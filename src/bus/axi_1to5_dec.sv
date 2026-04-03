@@ -466,14 +466,14 @@ logic          r_fifo_full;
 assign awsel[  0] = {1'b0, s_awaddr} >= 33'h0000_0000 && {1'b0, s_awaddr} < 33'h0000_0000 + 33'h0000_2000;
 assign awsel[  1] = {1'b0, s_awaddr} >= 33'h0002_0000 && {1'b0, s_awaddr} < 33'h0002_0000 + 33'h0002_0000;
 assign awsel[  2] = {1'b0, s_awaddr} >= 33'h0400_0000 && {1'b0, s_awaddr} < 33'h0400_0000 + 33'h0c00_0000;
-assign awsel[  3] = {1'b0, s_awaddr} >= 33'h1000_0000 && {1'b0, s_awaddr} < 33'h1000_0000 + 33'h0000_3000;
+assign awsel[  3] = {1'b0, s_awaddr} >= 33'h1000_0000 && {1'b0, s_awaddr} < 33'h1000_0000 + 33'h0008_0000; // OVIS: expanded for NNA ORAM
 assign awsel[  4] = {1'b0, s_awaddr} >= 33'h8000_0000 && {1'b0, s_awaddr} < 33'h8000_0000 + 33'h8000_0000;
 assign awsel[  5] = ~|awsel[4:0]; // default slv
 
 assign arsel[  0] = {1'b0, s_araddr} >= 33'h0000_0000 && {1'b0, s_araddr} < 33'h0000_0000 + 33'h0000_2000;
 assign arsel[  1] = {1'b0, s_araddr} >= 33'h0002_0000 && {1'b0, s_araddr} < 33'h0002_0000 + 33'h0002_0000;
 assign arsel[  2] = {1'b0, s_araddr} >= 33'h0400_0000 && {1'b0, s_araddr} < 33'h0400_0000 + 33'h0c00_0000;
-assign arsel[  3] = {1'b0, s_araddr} >= 33'h1000_0000 && {1'b0, s_araddr} < 33'h1000_0000 + 33'h0000_3000;
+assign arsel[  3] = {1'b0, s_araddr} >= 33'h1000_0000 && {1'b0, s_araddr} < 33'h1000_0000 + 33'h0008_0000; // OVIS: expanded for NNA ORAM
 assign arsel[  4] = {1'b0, s_araddr} >= 33'h8000_0000 && {1'b0, s_araddr} < 33'h8000_0000 + 33'h8000_0000;
 assign arsel[  5] = ~|arsel[4:0]; // default slv
 

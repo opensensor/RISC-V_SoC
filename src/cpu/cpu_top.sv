@@ -1039,8 +1039,78 @@ assign exe_ovx_is_custom1 = (id2exe_insn[6:2] == 5'b01_010);
 // During VLD/VST the pipeline is stalled (exe_ovx_okay=0), so the DPU
 // does not issue memory requests. The OVX unit drives dmem directly.
 // The mux is at the bottom of this file (after DPU instantiation).
+//
+// L1 cache protocol: The cache expects a single-cycle request pulse on
+// dmem_en, then holds the address stable while dmem_busy=1. When busy
+// drops, the data is ready and the next request can be issued. The OVX
+// holds mem_req high continuously during multi-beat transfers, so we
+// generate proper single-cycle request pulses here.
 assign exe_ovx_mem_rdata = dmem_rdata[`XLEN-1:0];
-assign exe_ovx_mem_ready = exe_ovx_mem_req && !dmem_busy;
+
+// OVX<->L1 cache adapter: convert continuous mem_req into single-cycle
+// request pulses that the L1 cache expects.
+//
+// State machine:
+//   IDLE:  waiting for OVX mem_req — issue dmem_en pulse on first cycle
+//   WAIT:  dmem_en was pulsed, now waiting for cache to finish (busy=1->0)
+//   DONE:  beat complete — signal mem_ready to OVX for one cycle
+typedef enum logic [1:0] {
+    OVX_MEM_IDLE = 2'd0,
+    OVX_MEM_REQ  = 2'd1,
+    OVX_MEM_WAIT = 2'd2,
+    OVX_MEM_DONE = 2'd3
+} ovx_mem_state_t;
+
+ovx_mem_state_t ovx_mem_state;
+logic           ovx_dmem_en_pulse;  // single-cycle request to L1 cache
+logic           ovx_mem_busy_seen;  // saw dmem_busy=1 at least once
+
+always_ff @(posedge clk_wfi or negedge srstn_sync) begin
+    if (~srstn_sync) begin
+        ovx_mem_state     <= OVX_MEM_IDLE;
+        ovx_mem_busy_seen <= 1'b0;
+    end else begin
+        case (ovx_mem_state)
+            OVX_MEM_IDLE: begin
+                ovx_mem_busy_seen <= 1'b0;
+                if (exe_ovx_mem_req)
+                    ovx_mem_state <= OVX_MEM_REQ;
+            end
+            OVX_MEM_REQ: begin
+                // One-cycle request pulse was issued; move to wait
+                ovx_mem_busy_seen <= 1'b0;
+                ovx_mem_state <= OVX_MEM_WAIT;
+            end
+            OVX_MEM_WAIT: begin
+                if (!exe_ovx_mem_req) begin
+                    // OVX cancelled (flush)
+                    ovx_mem_state <= OVX_MEM_IDLE;
+                end else begin
+                    if (dmem_busy)
+                        ovx_mem_busy_seen <= 1'b1;
+                    // Complete when cache finishes: busy was seen high, now low
+                    if (ovx_mem_busy_seen && !dmem_busy) begin
+                        ovx_mem_state <= OVX_MEM_DONE;
+                    end
+                end
+            end
+            OVX_MEM_DONE: begin
+                // Signal ready to OVX; if OVX still has beats, go back to REQ
+                ovx_mem_busy_seen <= 1'b0;
+                if (exe_ovx_mem_req)
+                    ovx_mem_state <= OVX_MEM_REQ;  // next beat
+                else
+                    ovx_mem_state <= OVX_MEM_IDLE;  // all beats done
+            end
+        endcase
+    end
+end
+
+// Single-cycle request pulse to L1 cache (only in REQ state)
+assign ovx_dmem_en_pulse = (ovx_mem_state == OVX_MEM_REQ);
+
+// Ready signal back to OVX (one cycle in DONE state)
+assign exe_ovx_mem_ready = (ovx_mem_state == OVX_MEM_DONE) && exe_ovx_mem_req;
 
 ovx_unit u_ovx (
     .clk        ( clk_wfi                            ),
@@ -1414,7 +1484,9 @@ logic                            dpu_dmem_ex;
 logic [     `DM_DATA_LEN/8-1:0] dpu_dmem_strb;
 logic [       `DM_DATA_LEN-1:0] dpu_dmem_wdata;
 
-assign dmem_en    = exe_ovx_mem_req ? 1'b1              : dpu_dmem_en;
+// Use single-cycle pulse for dmem_en (L1 cache protocol); hold other
+// signals stable while OVX transfer is active (exe_ovx_mem_req=1).
+assign dmem_en    = ovx_dmem_en_pulse ? 1'b1              : (exe_ovx_mem_req ? 1'b0 : dpu_dmem_en);
 assign dmem_addr  = exe_ovx_mem_req ? exe_ovx_mem_addr[`IM_ADDR_LEN-1:0] : dpu_dmem_addr;
 assign dmem_write = exe_ovx_mem_req ? exe_ovx_mem_wr    : dpu_dmem_write;
 assign dmem_ex    = exe_ovx_mem_req ? 1'b0              : dpu_dmem_ex;
