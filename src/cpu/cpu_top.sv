@@ -1064,32 +1064,40 @@ typedef enum logic [1:0] {
 ovx_mem_state_t ovx_mem_state;
 logic           ovx_dmem_en_pulse;  // single-cycle request to L1 cache
 logic           ovx_mem_busy_seen;  // saw dmem_busy=1 at least once
+logic           ovx_mem_waited;     // waited at least one cycle in WAIT
 
 always_ff @(posedge clk_wfi or negedge srstn_sync) begin
     if (~srstn_sync) begin
         ovx_mem_state     <= OVX_MEM_IDLE;
         ovx_mem_busy_seen <= 1'b0;
+        ovx_mem_waited    <= 1'b0;
     end else begin
         case (ovx_mem_state)
             OVX_MEM_IDLE: begin
                 ovx_mem_busy_seen <= 1'b0;
+                ovx_mem_waited    <= 1'b0;
                 if (exe_ovx_mem_req)
                     ovx_mem_state <= OVX_MEM_REQ;
             end
             OVX_MEM_REQ: begin
                 // One-cycle request pulse was issued; move to wait
                 ovx_mem_busy_seen <= 1'b0;
+                ovx_mem_waited    <= 1'b0;
                 ovx_mem_state <= OVX_MEM_WAIT;
             end
             OVX_MEM_WAIT: begin
                 if (!exe_ovx_mem_req) begin
                     // OVX cancelled (flush)
-                    ovx_mem_state <= OVX_MEM_IDLE;
+                    ovx_mem_state  <= OVX_MEM_IDLE;
+                    ovx_mem_waited <= 1'b0;
                 end else begin
+                    ovx_mem_waited <= 1'b1;
                     if (dmem_busy)
                         ovx_mem_busy_seen <= 1'b1;
-                    // Complete when cache finishes: busy was seen high, now low
-                    if (ovx_mem_busy_seen && !dmem_busy) begin
+                    // Complete when cache finishes: either busy was seen high
+                    // then dropped, or we waited at least one full cycle and
+                    // busy never asserted (zero-wait-state / cache hit).
+                    if (!dmem_busy && (ovx_mem_busy_seen || ovx_mem_waited)) begin
                         ovx_mem_state <= OVX_MEM_DONE;
                     end
                 end
@@ -1097,6 +1105,7 @@ always_ff @(posedge clk_wfi or negedge srstn_sync) begin
             OVX_MEM_DONE: begin
                 // Signal ready to OVX; if OVX still has beats, go back to REQ
                 ovx_mem_busy_seen <= 1'b0;
+                ovx_mem_waited    <= 1'b0;
                 if (exe_ovx_mem_req)
                     ovx_mem_state <= OVX_MEM_REQ;  // next beat
                 else
