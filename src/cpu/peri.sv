@@ -38,12 +38,14 @@ module peri (
 apb_intf uart_apb();
 apb_intf spi_apb();
 apb_intf mac_apb();
+apb_intf nna_apb();
 
 peri_apb_conn u_peri_apb_conn (
     .peri_apb ( s_apb_intf      ),
     .uart_apb ( uart_apb.master ),
     .spi_apb  ( spi_apb.master  ),
-    .mac_apb  ( mac_apb.master  )
+    .mac_apb  ( mac_apb.master  ),
+    .nna_apb  ( nna_apb.master  )
 );
 
 uart u_uart(
@@ -87,8 +89,25 @@ mac u_mac (
     .rmii_txen   ( rmii_txen     ),
     .rmii_txd    ( rmii_txd      ),
 
-    // Interrupt 
+    // Interrupt
     .irq_out     ( mac_irq       )
+);
+
+// OVIS-1: Neural Network Accelerator
+`include "ovis_config.svh"
+nna_unit u_nna (
+    .clk     ( clk                      ),
+    .rstn    ( rstn                     ),
+    .psel    ( nna_apb.slave.psel       ),
+    .penable ( nna_apb.slave.penable    ),
+    .paddr   ( nna_apb.slave.paddr      ),
+    .pwrite  ( nna_apb.slave.pwrite     ),
+    .pstrb   ( nna_apb.slave.pstrb      ),
+    .pwdata  ( nna_apb.slave.pwdata     ),
+    .prdata  ( nna_apb.slave.prdata     ),
+    .pready  ( nna_apb.slave.pready     ),
+    .pslverr ( nna_apb.slave.pslverr    ),
+    .irq     (                          )   // TODO: connect to interrupt controller
 );
 
 endmodule
