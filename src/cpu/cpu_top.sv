@@ -163,6 +163,7 @@ logic                             id_jump_fault;
 logic                             id_rs1_rd;
 logic                             id_rs2_rd;
 logic                             id_mdu_sel;
+logic                             id_ovx_sel;
 logic [        `MDU_OP_LEN - 1:0] id_mdu_op;
 logic [        `ALU_OP_LEN - 1:0] id_alu_op;
 logic                             id_rs1_zero_sel;
@@ -231,6 +232,7 @@ logic [              `XLEN - 1:0] id2exe_imm;
 logic                             id2exe_rs1_rd;
 logic                             id2exe_rs2_rd;
 logic                             id2exe_mdu_sel;
+logic                             id2exe_ovx_sel;
 logic [        `MDU_OP_LEN - 1:0] id2exe_mdu_op;
 logic [        `ALU_OP_LEN - 1:0] id2exe_alu_op;
 logic                             id2exe_rs1_zero_sel;
@@ -299,10 +301,12 @@ logic [              `XLEN - 1:0] exe_alu_out;
 logic [              `XLEN - 1:0] exe_mdu_out;
 logic                             exe_mdu_sel;
 logic                             exe_mdu_okay;
+logic                             exe_ovx_okay;
 logic [              `XLEN - 1:0] exe_rd_data;
 logic [              `XLEN - 1:0] exe_pc2rd;
 logic                             exe_gpr_hazard;
 logic                             exe_mdu_hazard;
+logic                             exe_ovx_hazard;
 logic                             exe_mem_hazard;
 logic                             exe_csr_hazard;
 logic                             exe_hazard;
@@ -692,6 +696,7 @@ idu u_idu (
     .rs1_rd              ( id_rs1_rd              ),
     .rs2_rd              ( id_rs2_rd              ),
     .mdu_sel             ( id_mdu_sel             ),
+    .ovx_sel             ( id_ovx_sel             ),
     .mdu_op              ( id_mdu_op              ),
     .alu_op              ( id_alu_op              ),
     .rs1_zero_sel        ( id_rs1_zero_sel        ),
@@ -806,6 +811,7 @@ always_ff @(posedge clk_wfi or negedge srstn_sync) begin
         id2exe_rs1_rd              <= 1'b0;
         id2exe_rs2_rd              <= 1'b0;
         id2exe_mdu_sel             <= 1'b0;
+        id2exe_ovx_sel             <= 1'b0;
         id2exe_mdu_op              <= `MDU_OP_LEN'b0;
         id2exe_alu_op              <= `ALU_OP_LEN'b0;
         id2exe_rs1_zero_sel        <= 1'b0;
@@ -873,6 +879,7 @@ always_ff @(posedge clk_wfi or negedge srstn_sync) begin
             id2exe_rs1_rd              <= id_rs1_rd;
             id2exe_rs2_rd              <= id_rs2_rd;
             id2exe_mdu_sel             <= ~id_flush & ~id_jump_fault & id_mdu_sel;
+            id2exe_ovx_sel             <= ~id_flush & ~id_jump_fault & id_ovx_sel;
             id2exe_mdu_op              <= id_mdu_op;
             id2exe_alu_op              <= id_alu_op;
             id2exe_rs1_zero_sel        <= id_rs1_zero_sel;
@@ -954,6 +961,7 @@ assign exe_rs2_data  = ({`XLEN{ exe2ma_fwd_table   [id2exe_rs2_addr]}} & ma_rd_d
 assign exe_gpr_hazard = (id2exe_rs1_rd && (exe2ma_hz_table[id2exe_rs1_addr] || ma2mr_hz_table[id2exe_rs1_addr])) ||
                         (id2exe_rs2_rd && (exe2ma_hz_table[id2exe_rs2_addr] || ma2mr_hz_table[id2exe_rs2_addr]));
 assign exe_mdu_hazard = id2exe_mdu_sel && ~exe_mdu_okay;
+assign exe_ovx_hazard = id2exe_ovx_sel && ~exe_ovx_okay;
 assign exe_mem_hazard = exe2ma_mem_req  || ma2mr_mem_req_wo_flush ||
                         ma_pipe_restart || mr_pipe_restart;
 assign exe_csr_hazard = exe_mem_hazard &&
@@ -963,9 +971,9 @@ assign exe_csr_hazard = exe_mem_hazard &&
                          id2exe_insn_misaligned || id2exe_insn_page_fault || id2exe_insn_xes_fault ||
                          id2exe_ecall);
 
-assign exe_hazard     = exe_gpr_hazard || exe_mdu_hazard || exe_csr_hazard;
+assign exe_hazard     = exe_gpr_hazard || exe_mdu_hazard || exe_ovx_hazard || exe_csr_hazard;
 
-assign exe_int_mask   = ~id2exe_insn_valid || exe_gpr_hazard || exe_mdu_hazard || exe_mem_hazard;
+assign exe_int_mask   = ~id2exe_insn_valid || exe_gpr_hazard || exe_mdu_hazard || exe_ovx_hazard || exe_mem_hazard;
 
 
 assign exe_pc_imm   = {{(`XLEN - `IM_ADDR_LEN){id2exe_pc[`IM_ADDR_LEN - 1]}}, id2exe_pc} + id2exe_imm;
@@ -1012,6 +1020,21 @@ mdu u_mdu(
     .src2   ( exe_rs2_data    ),
     .out    ( exe_mdu_out     ),
     .okay   ( exe_mdu_okay    )
+);
+
+`include "ovx_define.svh"
+ovx_unit u_ovx (
+    .clk       ( clk_wfi                            ),
+    .rstn      ( srstn_sync                         ),
+    .trig      ( id2exe_ovx_sel & ~exe_gpr_hazard   ),
+    .funct7    ( id2exe_insn[31:25]                  ),
+    .funct3    ( id2exe_insn[14:12]                  ),
+    .vs1_addr  ( id2exe_insn[19:16]                  ),
+    .vs2_addr  ( id2exe_insn[24:21]                  ),
+    .vd_addr   ( id2exe_insn[11:8]                   ),
+    .flush     ( exe_flush_force                     ),
+    .okay      ( exe_ovx_okay                        ),
+    .scalar_out(                                     )
 );
 
 assign exe_rd_data = ({`XLEN{ id2exe_mdu_sel}} & exe_mdu_out) |

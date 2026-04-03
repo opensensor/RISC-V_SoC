@@ -37,6 +37,7 @@ module dec (
     output logic                             rs2_rd,
     output logic                             mdu_sel,
     output logic [        `MDU_OP_LEN - 1:0] mdu_op,
+    output logic                             ovx_sel,
     output logic [        `ALU_OP_LEN - 1:0] alu_op,
     output logic                             rs1_zero_sel,
     output logic                             rs2_imm_sel,
@@ -148,6 +149,7 @@ always_comb begin
     rd_addr             = insn[11: 7];
     imm                 = `XLEN'b0;
     mdu_sel             = 1'b0;
+    ovx_sel             = 1'b0;
     mdu_op              = `MDU_OP_LEN'b0;
     alu_op              = `ALU_OP_LEN'b0;
     rs1_zero_sel        = 1'b0;
@@ -719,7 +721,14 @@ always_comb begin
                         endcase
                     end
                     OP_LOAD_FP  : ill_insn     = 1'b1;
-                    OP_CUST_0   : ill_insn     = 1'b1;
+                    OP_CUST_0   : begin
+                        // OVX vector instruction — decoded by ovx_unit
+                        // V-V ops: no GPR read/write needed
+                        ovx_sel      = 1'b1;
+                        rs1_rd       = 1'b0;
+                        rs2_rd       = 1'b0;
+                        reg_wr       = 1'b0;
+                    end
                     OP_MISC_MEM : begin
                         case (funct3)
                             FUNCT3_FENCE  : begin // FENCE, FENCE.TSO
