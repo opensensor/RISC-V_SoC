@@ -53,6 +53,15 @@ module cpu_top (
     output logic                             dmem_ex,
     output logic [     `DM_DATA_LEN/8 - 1:0] dmem_strb,
     output logic [       `DM_DATA_LEN - 1:0] dmem_wdata,
+    output logic                             dmem_ovx_active, // OVX VLD/VST is driving dmem
+
+    // OVX direct memory port (bypasses L1DC and crossbar)
+    output logic                             ovx_mem_req,
+    output logic                             ovx_mem_wr,
+    output logic [`XLEN - 1:0]              ovx_mem_addr,
+    output logic [`XLEN - 1:0]              ovx_mem_wdata,
+    input  logic [`XLEN - 1:0]              ovx_mem_rdata,
+    input  logic                             ovx_mem_ready,
     input        [       `DM_DATA_LEN - 1:0] dmem_rdata,
     input        [                      1:0] dmem_bad,
     input                                    dmem_xstate,
@@ -970,7 +979,10 @@ assign exe_rs2_data  = ({`XLEN{ exe2ma_fwd_table   [id2exe_rs2_addr]}} & ma_rd_d
 assign exe_gpr_hazard = (id2exe_rs1_rd && (exe2ma_hz_table[id2exe_rs1_addr] || ma2mr_hz_table[id2exe_rs1_addr])) ||
                         (id2exe_rs2_rd && (exe2ma_hz_table[id2exe_rs2_addr] || ma2mr_hz_table[id2exe_rs2_addr]));
 assign exe_mdu_hazard = id2exe_mdu_sel && ~exe_mdu_okay;
-assign exe_ovx_hazard = id2exe_ovx_sel && ~exe_ovx_okay;
+// Stall the pipeline when:
+// 1. An OVX instruction is in EXE and the OVX unit is busy (okay=0), OR
+// 2. The OVX memory port is actively driving dmem (prevent DPU conflicts)
+assign exe_ovx_hazard = (id2exe_ovx_sel && ~exe_ovx_okay) || exe_ovx_mem_req;
 assign exe_mem_hazard = exe2ma_mem_req  || ma2mr_mem_req_wo_flush ||
                         ma_pipe_restart || mr_pipe_restart;
 assign exe_csr_hazard = exe_mem_hazard &&
@@ -1035,91 +1047,17 @@ mdu u_mdu(
 // custom-1 opcode detection (0b0101011 = bits [6:2] = 5'b01010)
 assign exe_ovx_is_custom1 = (id2exe_insn[6:2] == 5'b01_010);
 
-// OVX memory port: connected to CPU's dmem interface.
-// During VLD/VST the pipeline is stalled (exe_ovx_okay=0), so the DPU
-// does not issue memory requests. The OVX unit drives dmem directly.
-// The mux is at the bottom of this file (after DPU instantiation).
-//
-// L1 cache protocol: The cache expects a single-cycle request pulse on
-// dmem_en, then holds the address stable while dmem_busy=1. When busy
-// drops, the data is ready and the next request can be issued. The OVX
-// holds mem_req high continuously during multi-beat transfers, so we
-// generate proper single-cycle request pulses here.
-assign exe_ovx_mem_rdata = dmem_rdata[`XLEN-1:0];
+// OVX memory port: bypasses L1DC and crossbar entirely.
+// Connected directly to SRAM in cpu_wrap for single-cycle access.
+assign exe_ovx_mem_rdata = ovx_mem_rdata;
+assign exe_ovx_mem_ready = ovx_mem_ready;
+assign ovx_mem_req   = exe_ovx_mem_req;
+assign ovx_mem_wr    = exe_ovx_mem_wr;
+assign ovx_mem_addr  = exe_ovx_mem_addr;
+assign ovx_mem_wdata = exe_ovx_mem_wdata;
 
-// OVX<->L1 cache adapter: convert continuous mem_req into single-cycle
-// request pulses that the L1 cache expects.
-//
-// State machine:
-//   IDLE:  waiting for OVX mem_req — issue dmem_en pulse on first cycle
-//   WAIT:  dmem_en was pulsed, now waiting for cache to finish (busy=1->0)
-//   DONE:  beat complete — signal mem_ready to OVX for one cycle
-typedef enum logic [1:0] {
-    OVX_MEM_IDLE = 2'd0,
-    OVX_MEM_REQ  = 2'd1,
-    OVX_MEM_WAIT = 2'd2,
-    OVX_MEM_DONE = 2'd3
-} ovx_mem_state_t;
-
-ovx_mem_state_t ovx_mem_state;
-logic           ovx_dmem_en_pulse;  // single-cycle request to L1 cache
-logic           ovx_mem_busy_seen;  // saw dmem_busy=1 at least once
-logic           ovx_mem_waited;     // waited at least one cycle in WAIT
-
-always_ff @(posedge clk_wfi or negedge srstn_sync) begin
-    if (~srstn_sync) begin
-        ovx_mem_state     <= OVX_MEM_IDLE;
-        ovx_mem_busy_seen <= 1'b0;
-        ovx_mem_waited    <= 1'b0;
-    end else begin
-        case (ovx_mem_state)
-            OVX_MEM_IDLE: begin
-                ovx_mem_busy_seen <= 1'b0;
-                ovx_mem_waited    <= 1'b0;
-                if (exe_ovx_mem_req)
-                    ovx_mem_state <= OVX_MEM_REQ;
-            end
-            OVX_MEM_REQ: begin
-                // One-cycle request pulse was issued; move to wait
-                ovx_mem_busy_seen <= 1'b0;
-                ovx_mem_waited    <= 1'b0;
-                ovx_mem_state <= OVX_MEM_WAIT;
-            end
-            OVX_MEM_WAIT: begin
-                if (!exe_ovx_mem_req) begin
-                    // OVX cancelled (flush)
-                    ovx_mem_state  <= OVX_MEM_IDLE;
-                    ovx_mem_waited <= 1'b0;
-                end else begin
-                    ovx_mem_waited <= 1'b1;
-                    if (dmem_busy)
-                        ovx_mem_busy_seen <= 1'b1;
-                    // Complete when cache finishes: either busy was seen high
-                    // then dropped, or we waited at least one full cycle and
-                    // busy never asserted (zero-wait-state / cache hit).
-                    if (!dmem_busy && (ovx_mem_busy_seen || ovx_mem_waited)) begin
-                        ovx_mem_state <= OVX_MEM_DONE;
-                    end
-                end
-            end
-            OVX_MEM_DONE: begin
-                // Signal ready to OVX; if OVX still has beats, go back to REQ
-                ovx_mem_busy_seen <= 1'b0;
-                ovx_mem_waited    <= 1'b0;
-                if (exe_ovx_mem_req)
-                    ovx_mem_state <= OVX_MEM_REQ;  // next beat
-                else
-                    ovx_mem_state <= OVX_MEM_IDLE;  // all beats done
-            end
-        endcase
-    end
-end
-
-// Single-cycle request pulse to L1 cache (only in REQ state)
-assign ovx_dmem_en_pulse = (ovx_mem_state == OVX_MEM_REQ);
-
-// Ready signal back to OVX (one cycle in DONE state)
-assign exe_ovx_mem_ready = (ovx_mem_state == OVX_MEM_DONE) && exe_ovx_mem_req;
+// Hazard signal for OVX memory operations
+assign dmem_ovx_active = exe_ovx_mem_req;
 
 ovx_unit u_ovx (
     .clk        ( clk_wfi                            ),
@@ -1473,34 +1411,19 @@ dpu u_dpu (
     .store_pg_fault   ( mr_store_page_fault  ),
     .store_xes_fault  ( mr_store_xes_fault   ),
                               
-    .dmem_req         ( dpu_dmem_en          ),
-    .dmem_addr        ( dpu_dmem_addr        ),
-    .dmem_wr          ( dpu_dmem_write       ),
-    .dmem_ex          ( dpu_dmem_ex          ),
-    .dmem_byte        ( dpu_dmem_strb        ),
-    .dmem_wdata       ( dpu_dmem_wdata       ),
+    .dmem_req         ( dmem_en              ),
+    .dmem_addr        ( dmem_addr            ),
+    .dmem_wr          ( dmem_write           ),
+    .dmem_ex          ( dmem_ex              ),
+    .dmem_byte        ( dmem_strb            ),
+    .dmem_wdata       ( dmem_wdata           ),
     .dmem_rdata       ( dmem_rdata           ),
     .dmem_bad         ( dmem_bad             ),
     .dmem_xstate      ( dmem_xstate          ),
     .dmem_busy        ( dmem_busy            )
 );
 
-// DPU ↔ OVX memory mux: OVX VLD/VST overrides DPU during stall
-logic                            dpu_dmem_en;
-logic [       `IM_ADDR_LEN-1:0] dpu_dmem_addr;
-logic                            dpu_dmem_write;
-logic                            dpu_dmem_ex;
-logic [     `DM_DATA_LEN/8-1:0] dpu_dmem_strb;
-logic [       `DM_DATA_LEN-1:0] dpu_dmem_wdata;
-
-// Use single-cycle pulse for dmem_en (L1 cache protocol); hold other
-// signals stable while OVX transfer is active (exe_ovx_mem_req=1).
-assign dmem_en    = ovx_dmem_en_pulse ? 1'b1              : (exe_ovx_mem_req ? 1'b0 : dpu_dmem_en);
-assign dmem_addr  = exe_ovx_mem_req ? exe_ovx_mem_addr[`IM_ADDR_LEN-1:0] : dpu_dmem_addr;
-assign dmem_write = exe_ovx_mem_req ? exe_ovx_mem_wr    : dpu_dmem_write;
-assign dmem_ex    = exe_ovx_mem_req ? 1'b0              : dpu_dmem_ex;
-assign dmem_strb  = exe_ovx_mem_req ? {(`DM_DATA_LEN/8){1'b1}} : dpu_dmem_strb;
-assign dmem_wdata = exe_ovx_mem_req ? exe_ovx_mem_wdata[`DM_DATA_LEN-1:0] : dpu_dmem_wdata;
+// (OVX memory uses direct SRAM path — no DPU/dmem mux needed)
 
 assign ma_rd_data = exe2ma_pc_alu_sel  ? exe2ma_pc2rd :
                     exe2ma_csr_alu_sel ? exe2ma_csr_rdata :

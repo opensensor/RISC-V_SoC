@@ -120,7 +120,15 @@ module cpu_wrap (
     input                  tck,
     input                  tms,
     input                  tdi,
-    output                 tdo
+    output                 tdo,
+
+    // OVX direct memory port (bypasses L1DC and crossbar)
+    output logic           ovx_dma_req,
+    output logic           ovx_dma_wr,
+    output logic  [ 63: 0] ovx_dma_addr,
+    output logic  [ 63: 0] ovx_dma_wdata,
+    input         [ 63: 0] ovx_dma_rdata,
+    input                  ovx_dma_ready
 );
 
 logic                             core_rstn;
@@ -224,6 +232,7 @@ logic                             dcache_bypass;
 logic                             dmmu_pa_vld;
 logic [                      1:0] dmmu_pa_bad;
 logic [                     55:0] dmmu_pa;
+logic                             dmem_ovx_active;
 logic                             dmmu_pa_pre_vld;
 logic                             dmmu_pa_pre_wr;
 logic                             dmmu_pa_pre_rd;
@@ -378,6 +387,15 @@ cpu_top u_cpu_top (
     .dmem_ex             ( dmem_ex                ),
     .dmem_strb           ( dmem_strb              ),
     .dmem_wdata          ( dmem_wdata             ),
+    .dmem_ovx_active     ( dmem_ovx_active        ),
+
+    // OVX direct memory port
+    .ovx_mem_req         ( ovx_dma_req            ),
+    .ovx_mem_wr          ( ovx_dma_wr             ),
+    .ovx_mem_addr        ( ovx_dma_addr           ),
+    .ovx_mem_wdata       ( ovx_dma_wdata          ),
+    .ovx_mem_rdata       ( ovx_dma_rdata          ),
+    .ovx_mem_ready       ( ovx_dma_ready          ),
     .dmem_rdata          ( dmem_rdata             ),
     .dmem_bad            ( dmem_bad               ),
     .dmem_xstate         ( dmem_xstate            ),
