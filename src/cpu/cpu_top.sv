@@ -302,6 +302,15 @@ logic [              `XLEN - 1:0] exe_mdu_out;
 logic                             exe_mdu_sel;
 logic                             exe_mdu_okay;
 logic                             exe_ovx_okay;
+logic [              `XLEN - 1:0] exe_ovx_scalar_out;
+logic                             exe_ovx_is_custom1;
+// OVX memory port (VLD/VST) — active master, directly connected to bus
+logic                             exe_ovx_mem_req;
+logic                             exe_ovx_mem_wr;
+logic [              `XLEN - 1:0] exe_ovx_mem_addr;
+logic [              `XLEN - 1:0] exe_ovx_mem_wdata;
+logic [              `XLEN - 1:0] exe_ovx_mem_rdata;
+logic                             exe_ovx_mem_ready;
 logic [              `XLEN - 1:0] exe_rd_data;
 logic [              `XLEN - 1:0] exe_pc2rd;
 logic                             exe_gpr_hazard;
@@ -1023,22 +1032,42 @@ mdu u_mdu(
 );
 
 `include "ovx_define.svh"
+// custom-1 opcode detection (0b0101011 = bits [6:2] = 5'b01010)
+assign exe_ovx_is_custom1 = (id2exe_insn[6:2] == 5'b01_010);
+
+// OVX memory port stub: tie off until bus integration is complete.
+// When the OVX memory port is connected to the bus fabric, replace these
+// with actual bus signals.
+assign exe_ovx_mem_rdata = '0;
+assign exe_ovx_mem_ready = 1'b0;  // never acknowledge — VLD/VST will stall
+
 ovx_unit u_ovx (
-    .clk       ( clk_wfi                            ),
-    .rstn      ( srstn_sync                         ),
-    .trig      ( id2exe_ovx_sel & ~exe_gpr_hazard   ),
-    .funct7    ( id2exe_insn[31:25]                  ),
-    .funct3    ( id2exe_insn[14:12]                  ),
-    .vs1_addr  ( id2exe_insn[19:16]                  ),
-    .vs2_addr  ( id2exe_insn[24:21]                  ),
-    .vd_addr   ( id2exe_insn[11:8]                   ),
-    .flush     ( exe_flush_force                     ),
-    .okay      ( exe_ovx_okay                        ),
-    .scalar_out(                                     )
+    .clk        ( clk_wfi                            ),
+    .rstn       ( srstn_sync                         ),
+    .trig       ( id2exe_ovx_sel & ~exe_gpr_hazard   ),
+    .funct7     ( id2exe_insn[31:25]                  ),
+    .funct3     ( id2exe_insn[14:12]                  ),
+    .vs1_addr   ( id2exe_insn[19:16]                  ),
+    .vs2_addr   ( id2exe_insn[24:21]                  ),
+    .vd_addr    ( id2exe_insn[11:8]                   ),
+    .flush      ( exe_flush_force                     ),
+    .scalar_in  ( exe_rs1_data                        ),
+    .imm        ( id2exe_imm                          ),
+    .is_custom1 ( exe_ovx_is_custom1                  ),
+    .okay       ( exe_ovx_okay                        ),
+    .scalar_out ( exe_ovx_scalar_out                  ),
+    .mem_req    ( exe_ovx_mem_req                     ),
+    .mem_wr     ( exe_ovx_mem_wr                      ),
+    .mem_addr   ( exe_ovx_mem_addr                    ),
+    .mem_wdata  ( exe_ovx_mem_wdata                   ),
+    .mem_rdata  ( exe_ovx_mem_rdata                   ),
+    .mem_ready  ( exe_ovx_mem_ready                   )
 );
 
+// exe_rd_data mux: MDU result, OVX scalar result (MVFV), or ALU result
 assign exe_rd_data = ({`XLEN{ id2exe_mdu_sel}} & exe_mdu_out) |
-                     ({`XLEN{~id2exe_mdu_sel}} & exe_alu_out);
+                     ({`XLEN{ id2exe_ovx_sel}} & exe_ovx_scalar_out) |
+                     ({`XLEN{~id2exe_mdu_sel & ~id2exe_ovx_sel}} & exe_alu_out);
 
 assign exe_pmu_csr_wr = id2exe_pmu_csr_wr & ~exe_flush_force & ~exe_hazard & ~exe_irq_en & ~exe_trap_en & ~stall_wfi;
 assign exe_fpu_csr_wr = id2exe_fpu_csr_wr & ~exe_flush_force & ~exe_hazard & ~exe_irq_en & ~exe_trap_en & ~stall_wfi;

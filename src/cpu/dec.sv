@@ -723,11 +723,30 @@ always_comb begin
                     OP_LOAD_FP  : ill_insn     = 1'b1;
                     OP_CUST_0   : begin
                         // OVX vector instruction — decoded by ovx_unit
-                        // V-V ops: no GPR read/write needed
                         ovx_sel      = 1'b1;
-                        rs1_rd       = 1'b0;
                         rs2_rd       = 1'b0;
-                        reg_wr       = 1'b0;
+                        case (insn[31:29])  // funct7[6:4] = operation class
+                            3'b111: begin   // GPR<->Vector moves
+                                case (insn[26:25])  // funct7[1:0] = sub-op
+                                    2'b00: begin    // MVTV: GPR -> Vector lane
+                                        rs1_rd   = 1'b1;   // read GPR rs1
+                                        reg_wr   = 1'b0;   // no GPR write
+                                    end
+                                    2'b01: begin    // MVFV: Vector lane -> GPR
+                                        rs1_rd   = 1'b0;   // no GPR read
+                                        reg_wr   = |rd_addr; // write GPR rd
+                                    end
+                                    default: begin
+                                        rs1_rd   = 1'b0;
+                                        reg_wr   = 1'b0;
+                                    end
+                                endcase
+                            end
+                            default: begin  // V-V ALU ops: no GPR read/write
+                                rs1_rd   = 1'b0;
+                                reg_wr   = 1'b0;
+                            end
+                        endcase
                     end
                     OP_MISC_MEM : begin
                         case (funct3)
@@ -865,7 +884,21 @@ always_comb begin
                         endcase
                     end
                     OP_STORE_FP : ill_insn     = 1'b1;
-                    OP_CUST_1   : ill_insn     = 1'b1;
+                    OP_CUST_1   : begin
+                        // OVX vector load/store — decoded by ovx_unit
+                        // Both VLD and VST need rs1 (GPR base address).
+                        // No GPR write-back; OVX handles its own register file.
+                        // mem_req=0: OVX unit manages its own memory port.
+                        ovx_sel      = 1'b1;
+                        rs1_rd       = 1'b1;   // base address from GPR
+                        rs2_rd       = 1'b0;
+                        reg_wr       = 1'b0;
+                        mem_req      = 1'b0;
+                        mem_wr       = 1'b0;
+                        // VLD uses I-type immediate, VST uses S-type immediate
+                        // funct3=000 → VLD (I-type), funct3=001 → VST (S-type)
+                        imm          = funct3[0] ? imm_s : imm_i;
+                    end
                     OP_AMO      : begin
                         amo_64       = funct3 == 3'b011;
                         amo          = 1'b1;
