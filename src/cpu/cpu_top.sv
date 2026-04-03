@@ -1035,11 +1035,12 @@ mdu u_mdu(
 // custom-1 opcode detection (0b0101011 = bits [6:2] = 5'b01010)
 assign exe_ovx_is_custom1 = (id2exe_insn[6:2] == 5'b01_010);
 
-// OVX memory port stub: tie off until bus integration is complete.
-// When the OVX memory port is connected to the bus fabric, replace these
-// with actual bus signals.
-assign exe_ovx_mem_rdata = '0;
-assign exe_ovx_mem_ready = 1'b0;  // never acknowledge — VLD/VST will stall
+// OVX memory port: connected to CPU's dmem interface.
+// During VLD/VST the pipeline is stalled (exe_ovx_okay=0), so the DPU
+// does not issue memory requests. The OVX unit drives dmem directly.
+// The mux is at the bottom of this file (after DPU instantiation).
+assign exe_ovx_mem_rdata = dmem_rdata[`XLEN-1:0];
+assign exe_ovx_mem_ready = exe_ovx_mem_req && !dmem_busy;
 
 ovx_unit u_ovx (
     .clk        ( clk_wfi                            ),
@@ -1393,17 +1394,32 @@ dpu u_dpu (
     .store_pg_fault   ( mr_store_page_fault  ),
     .store_xes_fault  ( mr_store_xes_fault   ),
                               
-    .dmem_req         ( dmem_en              ),
-    .dmem_addr        ( dmem_addr            ),
-    .dmem_wr          ( dmem_write           ),
-    .dmem_ex          ( dmem_ex              ),
-    .dmem_byte        ( dmem_strb            ),
-    .dmem_wdata       ( dmem_wdata           ),
+    .dmem_req         ( dpu_dmem_en          ),
+    .dmem_addr        ( dpu_dmem_addr        ),
+    .dmem_wr          ( dpu_dmem_write       ),
+    .dmem_ex          ( dpu_dmem_ex          ),
+    .dmem_byte        ( dpu_dmem_strb        ),
+    .dmem_wdata       ( dpu_dmem_wdata       ),
     .dmem_rdata       ( dmem_rdata           ),
     .dmem_bad         ( dmem_bad             ),
     .dmem_xstate      ( dmem_xstate          ),
     .dmem_busy        ( dmem_busy            )
 );
+
+// DPU ↔ OVX memory mux: OVX VLD/VST overrides DPU during stall
+logic                            dpu_dmem_en;
+logic [       `IM_ADDR_LEN-1:0] dpu_dmem_addr;
+logic                            dpu_dmem_write;
+logic                            dpu_dmem_ex;
+logic [     `DM_DATA_LEN/8-1:0] dpu_dmem_strb;
+logic [       `DM_DATA_LEN-1:0] dpu_dmem_wdata;
+
+assign dmem_en    = exe_ovx_mem_req ? 1'b1              : dpu_dmem_en;
+assign dmem_addr  = exe_ovx_mem_req ? exe_ovx_mem_addr[`IM_ADDR_LEN-1:0] : dpu_dmem_addr;
+assign dmem_write = exe_ovx_mem_req ? exe_ovx_mem_wr    : dpu_dmem_write;
+assign dmem_ex    = exe_ovx_mem_req ? 1'b0              : dpu_dmem_ex;
+assign dmem_strb  = exe_ovx_mem_req ? {(`DM_DATA_LEN/8){1'b1}} : dpu_dmem_strb;
+assign dmem_wdata = exe_ovx_mem_req ? exe_ovx_mem_wdata[`DM_DATA_LEN-1:0] : dpu_dmem_wdata;
 
 assign ma_rd_data = exe2ma_pc_alu_sel  ? exe2ma_pc2rd :
                     exe2ma_csr_alu_sel ? exe2ma_csr_rdata :
