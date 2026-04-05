@@ -15,18 +15,21 @@ module csr (
     output logic                mmu_csr_wr,
     output logic                mpu_csr_wr,
     output logic                sru_csr_wr,
+    output logic                ovx_csr_wr,
     input                       pmu_csr_hit,
     input                       fpu_csr_hit,
     input                       dbg_csr_hit,
     input                       mmu_csr_hit,
     input                       mpu_csr_hit,
     input                       sru_csr_hit,
+    input                       ovx_csr_hit,
     input        [`XLEN - 1: 0] pmu_csr_rdata,
     input        [`XLEN - 1: 0] fpu_csr_rdata,
     input        [`XLEN - 1: 0] dbg_csr_rdata,
     input        [`XLEN - 1: 0] mmu_csr_rdata,
     input        [`XLEN - 1: 0] mpu_csr_rdata,
-    input        [`XLEN - 1: 0] sru_csr_rdata
+    input        [`XLEN - 1: 0] sru_csr_rdata,
+    input        [`XLEN - 1: 0] ovx_csr_rdata
 
 );
 
@@ -39,8 +42,11 @@ logic                mmu_csr_sel;
 logic                mpu_csr_sel;
 logic                sru_csr_sel;
 logic                fpu_csr_sel;
+logic                ovx_csr_sel;
 
-assign pmu_csr_sel = raddr[11] || {raddr[11:10], raddr[7:5]} == 5'b00_001 || raddr == 12'h106 || raddr == 12'h306;
+// OVX CSR: 0x800-0x801 (machine custom R/W space)
+assign ovx_csr_sel = raddr[11:1] == 11'b1000_0000_000;  // matches 0x800 and 0x801
+assign pmu_csr_sel = (raddr[11] || {raddr[11:10], raddr[7:5]} == 5'b00_001 || raddr == 12'h106 || raddr == 12'h306) && ~ovx_csr_sel;
 assign dbg_csr_sel = raddr[11:10] == 2'b01;
 assign mmu_csr_sel = raddr == 12'h180;
 assign mpu_csr_sel = {raddr[11:10], raddr[7]} == 3'b00_1 && ~mmu_csr_sel;
@@ -55,15 +61,17 @@ assign dbg_csr_wr = dbg_csr_sel & wr;
 assign mmu_csr_wr = mmu_csr_sel & wr;
 assign mpu_csr_wr = mpu_csr_sel & wr;
 assign sru_csr_wr = sru_csr_sel & wr;
+assign ovx_csr_wr = ovx_csr_sel & wr;
 
 assign rdata_pre = (pmu_csr_rdata)|
                    (dbg_csr_rdata)|
                    (mmu_csr_rdata)|
                    (mpu_csr_rdata)|
                    (sru_csr_rdata)|
-                   (fpu_csr_rdata);
+                   (fpu_csr_rdata)|
+                   (ovx_csr_rdata);
 
-assign csr_no_hit = ~(pmu_csr_hit | fpu_csr_hit | dbg_csr_hit | mmu_csr_hit | mpu_csr_hit | sru_csr_hit);
+assign csr_no_hit = ~(pmu_csr_hit | fpu_csr_hit | dbg_csr_hit | mmu_csr_hit | mpu_csr_hit | sru_csr_hit | ovx_csr_hit);
 
 assign csr_ill = (rd && csr_no_hit) || (wr && (csr_no_hit || raddr[11:10] == 2'b11));
 

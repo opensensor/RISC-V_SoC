@@ -32,21 +32,47 @@ module peri (
     // IRQ
     output            uart_irq,
     output            spi_irq,
-    output            mac_irq
+    output            mac_irq,
+
+    // OVIS external APB (PLIC, CSI, VENC, Crypto, VDMA)
+    output            ovis_psel,
+    output            ovis_penable,
+    output   [ 31: 0] ovis_paddr,
+    output            ovis_pwrite,
+    output   [  3: 0] ovis_pstrb,
+    output   [  2: 0] ovis_pprot,
+    output   [ 31: 0] ovis_pwdata,
+    input    [ 31: 0] ovis_prdata,
+    input             ovis_pslverr,
+    input             ovis_pready
 );
 
 apb_intf uart_apb();
 apb_intf spi_apb();
 apb_intf mac_apb();
 apb_intf nna_apb();
+apb_intf ovis_apb_intf();
 
 peri_apb_conn u_peri_apb_conn (
-    .peri_apb ( s_apb_intf      ),
-    .uart_apb ( uart_apb.master ),
-    .spi_apb  ( spi_apb.master  ),
-    .mac_apb  ( mac_apb.master  ),
-    .nna_apb  ( nna_apb.master  )
+    .peri_apb ( s_apb_intf           ),
+    .uart_apb ( uart_apb.master      ),
+    .spi_apb  ( spi_apb.master       ),
+    .mac_apb  ( mac_apb.master       ),
+    .nna_apb  ( nna_apb.master       ),
+    .ovis_apb ( ovis_apb_intf.master )
 );
+
+// Bridge ovis_apb interface to flat ports
+assign ovis_psel    = ovis_apb_intf.psel;
+assign ovis_penable = ovis_apb_intf.penable;
+assign ovis_paddr   = ovis_apb_intf.paddr;
+assign ovis_pwrite  = ovis_apb_intf.pwrite;
+assign ovis_pstrb   = ovis_apb_intf.pstrb;
+assign ovis_pprot   = ovis_apb_intf.pprot;
+assign ovis_pwdata  = ovis_apb_intf.pwdata;
+assign ovis_apb_intf.prdata  = ovis_prdata;
+assign ovis_apb_intf.pslverr = ovis_pslverr;
+assign ovis_apb_intf.pready  = ovis_pready;
 
 uart u_uart(
     .clk        ( clk            ),

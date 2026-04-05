@@ -1,6 +1,12 @@
 *.fsdb
 *.rc
 
+# Simulation build artifacts
+sim/prog*/*.o
+sim/prog*/*.hex
+sim/prog*/*.log
+sim/prog*/main
+
 # temporary
 *.swp
 *.swo

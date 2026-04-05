@@ -208,12 +208,14 @@ logic                             id_dbg_csr_wr;
 logic                             id_mmu_csr_wr;
 logic                             id_mpu_csr_wr;
 logic                             id_sru_csr_wr;
+logic                             id_ovx_csr_wr;
 logic                             id_pmu_csr_hit;
 logic                             id_fpu_csr_hit;
 logic                             id_dbg_csr_hit;
 logic                             id_mmu_csr_hit;
 logic                             id_mpu_csr_hit;
 logic                             id_sru_csr_hit;
+logic                             id_ovx_csr_hit;
 logic                             id_csr_ill;
 logic [              `XLEN - 1:0] id_csr_rdata;
 logic [              `XLEN - 1:0] id_pmu_csr_rdata;
@@ -222,6 +224,7 @@ logic [              `XLEN - 1:0] id_dbg_csr_rdata;
 logic [              `XLEN - 1:0] id_mmu_csr_rdata;
 logic [              `XLEN - 1:0] id_mpu_csr_rdata;
 logic [              `XLEN - 1:0] id_sru_csr_rdata;
+logic [              `XLEN - 1:0] id_ovx_csr_rdata;
 
 // ID/EXE pipeline
 logic [       `IM_ADDR_LEN - 1:0] id2exe_pc;
@@ -260,6 +263,7 @@ logic                             id2exe_dbg_csr_wr;
 logic                             id2exe_mmu_csr_wr;
 logic                             id2exe_mpu_csr_wr;
 logic                             id2exe_sru_csr_wr;
+logic                             id2exe_ovx_csr_wr;
 
 logic                             id2exe_pc_alu_sel;
 logic                             id2exe_csr_alu_sel;
@@ -320,6 +324,13 @@ logic [              `XLEN - 1:0] exe_ovx_mem_addr;
 logic [              `XLEN - 1:0] exe_ovx_mem_wdata;
 logic [              `XLEN - 1:0] exe_ovx_mem_rdata;
 logic                             exe_ovx_mem_ready;
+
+// OVX CSR interface signals
+logic [                      1:0] ovx_rounding_mode;
+logic                             ovx_sat_en;
+logic                             ovx_en;
+logic                             ovx_sat_occurred;
+logic                             ovx_write;
 logic [              `XLEN - 1:0] exe_rd_data;
 logic [              `XLEN - 1:0] exe_pc2rd;
 logic                             exe_gpr_hazard;
@@ -342,6 +353,7 @@ logic                             exe_dbg_csr_wr;
 logic                             exe_mmu_csr_wr;
 logic                             exe_mpu_csr_wr;
 logic                             exe_sru_csr_wr;
+logic                             exe_ovx_csr_wr;
 logic                             exe_sret;
 logic                             exe_mret;
 logic                             exe_eret_en;
@@ -778,18 +790,21 @@ csr u_csr (
     .mmu_csr_wr    ( id_mmu_csr_wr    ),
     .mpu_csr_wr    ( id_mpu_csr_wr    ),
     .sru_csr_wr    ( id_sru_csr_wr    ),
+    .ovx_csr_wr    ( id_ovx_csr_wr    ),
     .pmu_csr_hit   ( id_pmu_csr_hit   ),
     .fpu_csr_hit   ( id_fpu_csr_hit   ),
     .dbg_csr_hit   ( id_dbg_csr_hit   ),
     .mmu_csr_hit   ( id_mmu_csr_hit   ),
     .mpu_csr_hit   ( id_mpu_csr_hit   ),
     .sru_csr_hit   ( id_sru_csr_hit   ),
+    .ovx_csr_hit   ( id_ovx_csr_hit   ),
     .pmu_csr_rdata ( id_pmu_csr_rdata ),
     .fpu_csr_rdata ( id_fpu_csr_rdata ),
     .dbg_csr_rdata ( id_dbg_csr_rdata ),
     .mmu_csr_rdata ( id_mmu_csr_rdata ),
     .mpu_csr_rdata ( id_mpu_csr_rdata ),
-    .sru_csr_rdata ( id_sru_csr_rdata )
+    .sru_csr_rdata ( id_sru_csr_rdata ),
+    .ovx_csr_rdata ( id_ovx_csr_rdata )
 );
 
 assign dbg_csr_out = id_csr_rdata;
@@ -806,7 +821,8 @@ assign id_rs2_data = fwd_wb2id_rd_rs2 ? mr2wb_rd_data :
 // ID Hazard
 assign id_hazard = (id_csr_rd &&
                     (exe_pmu_csr_wr | exe_fpu_csr_wr | exe_dbg_csr_wr |
-                     exe_mmu_csr_wr | exe_mpu_csr_wr | exe_sru_csr_wr) &&
+                     exe_mmu_csr_wr | exe_mpu_csr_wr | exe_sru_csr_wr |
+                     exe_ovx_csr_wr) &&
                     (id_csr_addr == id2exe_csr_waddr));
 
 
@@ -848,6 +864,7 @@ always_ff @(posedge clk_wfi or negedge srstn_sync) begin
         id2exe_mmu_csr_wr          <= 1'b0;
         id2exe_mpu_csr_wr          <= 1'b0;
         id2exe_sru_csr_wr          <= 1'b0;
+        id2exe_ovx_csr_wr          <= 1'b0;
         id2exe_pc_alu_sel          <= 1'b0;
         id2exe_csr_alu_sel         <= 1'b0;
         id2exe_amo                 <= 1'b0;
@@ -916,6 +933,7 @@ always_ff @(posedge clk_wfi or negedge srstn_sync) begin
             id2exe_mmu_csr_wr          <= ~id_flush & ~id_jump_fault & id_mmu_csr_wr;
             id2exe_mpu_csr_wr          <= ~id_flush & ~id_jump_fault & id_mpu_csr_wr;
             id2exe_sru_csr_wr          <= ~id_flush & ~id_jump_fault & id_sru_csr_wr;
+            id2exe_ovx_csr_wr          <= ~id_flush & ~id_jump_fault & id_ovx_csr_wr;
             id2exe_pc_alu_sel          <= id_pc_alu_sel;
             id2exe_csr_alu_sel         <= id_csr_alu_sel;
             id2exe_amo                 <= id_amo;
@@ -988,6 +1006,7 @@ assign exe_mem_hazard = exe2ma_mem_req  || ma2mr_mem_req_wo_flush ||
 assign exe_csr_hazard = exe_mem_hazard &&
                         (id2exe_pmu_csr_wr || id2exe_fpu_csr_wr || id2exe_dbg_csr_wr ||
                          id2exe_mmu_csr_wr || id2exe_mpu_csr_wr || id2exe_sru_csr_wr ||
+                         id2exe_ovx_csr_wr ||
                          id2exe_sret       || id2exe_mret       || id2exe_ill_insn   ||
                          id2exe_insn_misaligned || id2exe_insn_page_fault || id2exe_insn_xes_fault ||
                          id2exe_ecall);
@@ -1060,26 +1079,46 @@ assign ovx_mem_wdata = exe_ovx_mem_wdata;
 assign dmem_ovx_active = exe_ovx_mem_req;
 
 ovx_unit u_ovx (
-    .clk        ( clk_wfi                            ),
-    .rstn       ( srstn_sync                         ),
-    .trig       ( id2exe_ovx_sel & ~exe_gpr_hazard   ),
-    .funct7     ( id2exe_insn[31:25]                  ),
-    .funct3     ( id2exe_insn[14:12]                  ),
-    .vs1_addr   ( id2exe_insn[19:16]                  ),
-    .vs2_addr   ( id2exe_insn[24:21]                  ),
-    .vd_addr    ( id2exe_insn[11:8]                   ),
-    .flush      ( exe_flush_force                     ),
-    .scalar_in  ( exe_rs1_data                        ),
-    .imm        ( id2exe_imm                          ),
-    .is_custom1 ( exe_ovx_is_custom1                  ),
-    .okay       ( exe_ovx_okay                        ),
-    .scalar_out ( exe_ovx_scalar_out                  ),
-    .mem_req    ( exe_ovx_mem_req                     ),
-    .mem_wr     ( exe_ovx_mem_wr                      ),
-    .mem_addr   ( exe_ovx_mem_addr                    ),
-    .mem_wdata  ( exe_ovx_mem_wdata                   ),
-    .mem_rdata  ( exe_ovx_mem_rdata                   ),
-    .mem_ready  ( exe_ovx_mem_ready                   )
+    .clk            ( clk_wfi                            ),
+    .rstn           ( srstn_sync                         ),
+    .trig           ( id2exe_ovx_sel & ~exe_gpr_hazard   ),
+    .funct7         ( id2exe_insn[31:25]                  ),
+    .funct3         ( id2exe_insn[14:12]                  ),
+    .vs1_addr       ( id2exe_insn[19:16]                  ),
+    .vs2_addr       ( id2exe_insn[24:21]                  ),
+    .vd_addr        ( id2exe_insn[11:8]                   ),
+    .flush          ( exe_flush_force                     ),
+    .scalar_in      ( exe_rs1_data                        ),
+    .imm            ( id2exe_imm                          ),
+    .is_custom1     ( exe_ovx_is_custom1                  ),
+    .okay           ( exe_ovx_okay                        ),
+    .scalar_out     ( exe_ovx_scalar_out                  ),
+    .mem_req        ( exe_ovx_mem_req                     ),
+    .mem_wr         ( exe_ovx_mem_wr                      ),
+    .mem_addr       ( exe_ovx_mem_addr                    ),
+    .mem_wdata      ( exe_ovx_mem_wdata                   ),
+    .mem_rdata      ( exe_ovx_mem_rdata                   ),
+    .mem_ready      ( exe_ovx_mem_ready                   ),
+    .rounding_mode  ( ovx_rounding_mode                   ),
+    .sat_occurred   ( ovx_sat_occurred                    ),
+    .ovx_write      ( ovx_write                           )
+);
+
+ovx_csr u_ovx_csr (
+    .clk            ( clk_wfi           ),
+    .rstn           ( srstn_sync        ),
+    .csr_wr         ( exe_ovx_csr_wr    ),
+    .csr_waddr      ( id2exe_csr_waddr  ),
+    .csr_raddr      ( id_csr_addr       ),
+    .csr_sdata      ( exe_csr_sdata     ),
+    .csr_cdata      ( exe_csr_cdata     ),
+    .csr_rdata      ( id_ovx_csr_rdata  ),
+    .csr_hit        ( id_ovx_csr_hit    ),
+    .rounding_mode  ( ovx_rounding_mode ),
+    .sat_en         ( ovx_sat_en        ),
+    .ovx_en         ( ovx_en            ),
+    .sat_occurred   ( ovx_sat_occurred  ),
+    .ovx_write      ( ovx_write         )
 );
 
 // exe_rd_data mux: MDU result, OVX scalar result (MVFV), or ALU result
@@ -1093,6 +1132,7 @@ assign exe_dbg_csr_wr = id2exe_dbg_csr_wr & ~exe_flush_force & ~exe_hazard & ~ex
 assign exe_mmu_csr_wr = id2exe_mmu_csr_wr & ~exe_flush_force & ~exe_hazard & ~exe_irq_en & ~exe_trap_en & ~stall_wfi;
 assign exe_mpu_csr_wr = id2exe_mpu_csr_wr & ~exe_flush_force & ~exe_hazard & ~exe_irq_en & ~exe_trap_en & ~stall_wfi;
 assign exe_sru_csr_wr = id2exe_sru_csr_wr & ~exe_flush_force & ~exe_hazard & ~exe_irq_en & ~exe_trap_en & ~stall_wfi;
+assign exe_ovx_csr_wr = id2exe_ovx_csr_wr & ~exe_flush_force & ~exe_hazard & ~exe_irq_en & ~exe_trap_en & ~stall_wfi;
 assign exe_sret       = id2exe_sret       & ~exe_flush_force & ~exe_hazard & ~exe_irq_en & ~exe_trap_en & ~stall_wfi;
 assign exe_mret       = id2exe_mret       & ~exe_flush_force & ~exe_hazard & ~exe_irq_en & ~exe_trap_en & ~stall_wfi;
 
@@ -1338,7 +1378,8 @@ always_ff @(posedge clk_wfi or negedge srstn_sync) begin
                                             exe_dbg_csr_wr|
                                             exe_mmu_csr_wr|
                                             exe_mpu_csr_wr|
-                                            exe_sru_csr_wr);
+                                            exe_sru_csr_wr|
+                                            exe_ovx_csr_wr);
             exe2ma_csr_waddr           <= id2exe_csr_waddr;
             exe2ma_csr_wdata           <= exe_csr_wdata;
             exe2ma_wfi                 <= ~exe_flush & ~exe_jump_fault & ~exe_irq_en & ~exe2ma_wfi & ~wakeup_event & id2exe_wfi;

@@ -128,7 +128,22 @@ module cpu_wrap (
     output logic  [ 63: 0] ovx_dma_addr,
     output logic  [ 63: 0] ovx_dma_wdata,
     input         [ 63: 0] ovx_dma_rdata,
-    input                  ovx_dma_ready
+    input                  ovx_dma_ready,
+
+    // External PLIC interrupt (active-high, from OVIS SoC-level PLIC)
+    input                  ext_plic_eip,
+
+    // OVIS external APB master (PLIC, CSI, VENC, Crypto, VDMA)
+    output logic           ovis_psel,
+    output logic           ovis_penable,
+    output logic  [ 31: 0] ovis_paddr,
+    output logic           ovis_pwrite,
+    output logic  [  3: 0] ovis_pstrb,
+    output logic  [  2: 0] ovis_pprot,
+    output logic  [ 31: 0] ovis_pwdata,
+    input         [ 31: 0] ovis_prdata,
+    input                  ovis_pslverr,
+    input                  ovis_pready
 );
 
 logic                             core_rstn;
@@ -824,7 +839,8 @@ sram u_sram (
 );
 
 assign ints = {
-    27'b0,
+    26'b0,
+    ext_plic_eip,  // bit 5: OVIS SoC-level PLIC aggregated interrupt
     dbgmon_irq,
     mac_irq,
     spi_irq,
@@ -904,7 +920,19 @@ peri u_peri (
 
     .uart_irq       ( uart_irq       ),
     .spi_irq        ( spi_irq        ),
-    .mac_irq        ( mac_irq        )
+    .mac_irq        ( mac_irq        ),
+
+    // OVIS external APB
+    .ovis_psel      ( ovis_psel      ),
+    .ovis_penable   ( ovis_penable   ),
+    .ovis_paddr     ( ovis_paddr     ),
+    .ovis_pwrite    ( ovis_pwrite    ),
+    .ovis_pstrb     ( ovis_pstrb     ),
+    .ovis_pprot     ( ovis_pprot     ),
+    .ovis_pwdata    ( ovis_pwdata    ),
+    .ovis_prdata    ( ovis_prdata    ),
+    .ovis_pslverr   ( ovis_pslverr   ),
+    .ovis_pready    ( ovis_pready    )
 );
 
 assign trstn = 1'b1;

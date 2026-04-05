@@ -131,7 +131,30 @@ module cpu_wrap (
     input                  tck,
     input                  tms,
     input                  tdi,
-    output                 tdo
+    output                 tdo,
+
+    // OVX direct memory port (bypasses L1DC and crossbar)
+    output logic           ovx_dma_req,
+    output logic           ovx_dma_wr,
+    output logic  [ 63: 0] ovx_dma_addr,
+    output logic  [ 63: 0] ovx_dma_wdata,
+    input         [ 63: 0] ovx_dma_rdata,
+    input                  ovx_dma_ready,
+
+    // External PLIC interrupt (active-high, from OVIS SoC-level PLIC)
+    input                  ext_plic_eip,
+
+    // OVIS external APB master (PLIC, CSI, VENC, Crypto, VDMA)
+    output logic           ovis_psel,
+    output logic           ovis_penable,
+    output logic  [ 31: 0] ovis_paddr,
+    output logic           ovis_pwrite,
+    output logic  [  3: 0] ovis_pstrb,
+    output logic  [  2: 0] ovis_pprot,
+    output logic  [ 31: 0] ovis_pwdata,
+    input         [ 31: 0] ovis_prdata,
+    input                  ovis_pslverr,
+    input                  ovis_pready
 );
 
 logic                             core_rstn;
@@ -335,6 +358,13 @@ axi_intf#(.ID_WIDTH( 8)) dap_axi();
 axi_intf#(.ID_WIDTH( 9)) dbg_axi();
 axi_intf#(.ID_WIDTH(10)) peri_axi();
 axi_intf#(.ID_WIDTH(10)) peri_scu_axi();
+
+// OVX DMA port — not present in cpu_wrap.all.sv cpu_top (OVX is in individual files only)
+// Tie off inactive for FPGA builds that use the concatenated file.
+assign ovx_dma_req   = 1'b0;
+assign ovx_dma_wr    = 1'b0;
+assign ovx_dma_addr  = 64'b0;
+assign ovx_dma_wdata = 64'b0;
 
 cpu_top u_cpu_top (
     .clk                 ( clk                    ),
@@ -817,7 +847,8 @@ sram u_sram (
 );
 
 assign ints = {
-    27'b0,
+    26'b0,
+    ext_plic_eip,  // bit 5: OVIS SoC-level PLIC aggregated interrupt
     dbgmon_irq,
     mac_irq,
     spi_irq,
@@ -897,7 +928,18 @@ peri u_peri (
 
     .uart_irq       ( uart_irq       ),
     .spi_irq        ( spi_irq        ),
-    .mac_irq        ( mac_irq        )
+    .mac_irq        ( mac_irq        ),
+
+    .ovis_psel      ( ovis_psel      ),
+    .ovis_penable   ( ovis_penable   ),
+    .ovis_paddr     ( ovis_paddr     ),
+    .ovis_pwrite    ( ovis_pwrite    ),
+    .ovis_pstrb     ( ovis_pstrb     ),
+    .ovis_pprot     ( ovis_pprot     ),
+    .ovis_pwdata    ( ovis_pwdata    ),
+    .ovis_prdata    ( ovis_prdata    ),
+    .ovis_pslverr   ( ovis_pslverr   ),
+    .ovis_pready    ( ovis_pready    )
 );
 
 assign trstn = 1'b1;
@@ -10445,19 +10487,52 @@ module peri (
     // IRQ
     output            uart_irq,
     output            spi_irq,
-    output            mac_irq
+    output            mac_irq,
+
+    // OVIS external APB (PLIC, CSI, VENC, Crypto, VDMA)
+    output            ovis_psel,
+    output            ovis_penable,
+    output   [ 31: 0] ovis_paddr,
+    output            ovis_pwrite,
+    output   [  3: 0] ovis_pstrb,
+    output   [  2: 0] ovis_pprot,
+    output   [ 31: 0] ovis_pwdata,
+    input    [ 31: 0] ovis_prdata,
+    input             ovis_pslverr,
+    input             ovis_pready
 );
 
 apb_intf uart_apb();
 apb_intf spi_apb();
 apb_intf mac_apb();
+apb_intf nna_apb();
+apb_intf ovis_apb_intf();
 
 peri_apb_conn u_peri_apb_conn (
-    .peri_apb ( s_apb_intf      ),
-    .uart_apb ( uart_apb.master ),
-    .spi_apb  ( spi_apb.master  ),
-    .mac_apb  ( mac_apb.master  )
+    .peri_apb ( s_apb_intf           ),
+    .uart_apb ( uart_apb.master      ),
+    .spi_apb  ( spi_apb.master       ),
+    .mac_apb  ( mac_apb.master       ),
+    .nna_apb  ( nna_apb.master       ),
+    .ovis_apb ( ovis_apb_intf.master )
 );
+
+// Bridge ovis_apb interface to flat ports
+assign ovis_psel    = ovis_apb_intf.psel;
+assign ovis_penable = ovis_apb_intf.penable;
+assign ovis_paddr   = ovis_apb_intf.paddr;
+assign ovis_pwrite  = ovis_apb_intf.pwrite;
+assign ovis_pstrb   = ovis_apb_intf.pstrb;
+assign ovis_pprot   = ovis_apb_intf.pprot;
+assign ovis_pwdata  = ovis_apb_intf.pwdata;
+assign ovis_apb_intf.prdata  = ovis_prdata;
+assign ovis_apb_intf.pslverr = ovis_pslverr;
+assign ovis_apb_intf.pready  = ovis_pready;
+
+// NNA APB — inactive in cpu_wrap.all.sv (NNA connected externally)
+assign nna_apb.slave.prdata  = 32'b0;
+assign nna_apb.slave.pslverr = 1'b0;
+assign nna_apb.slave.pready  = 1'b1;
 
 uart u_uart(
     .clk        ( clk            ),
@@ -18022,15 +18097,19 @@ logic          r_fifo_full;
 
 assign awsel[  0] = {1'b0, s_awaddr} >= 33'h0000_0000 && {1'b0, s_awaddr} < 33'h0000_0000 + 33'h0000_2000;
 assign awsel[  1] = {1'b0, s_awaddr} >= 33'h0002_0000 && {1'b0, s_awaddr} < 33'h0002_0000 + 33'h0002_0000;
-assign awsel[  2] = {1'b0, s_awaddr} >= 33'h0400_0000 && {1'b0, s_awaddr} < 33'h0400_0000 + 33'h0c00_0000;
-assign awsel[  3] = {1'b0, s_awaddr} >= 33'h1000_0000 && {1'b0, s_awaddr} < 33'h1000_0000 + 33'h0000_3000;
+assign awsel[  2] = {1'b0, s_awaddr} >= 33'h0400_0000 && {1'b0, s_awaddr} < 33'h0400_0000 + 33'h0800_0000; // OVIS: shrunk to [0x0400_0000, 0x0C00_0000) — CFGREG, DBGMON, CLINT
+assign awsel[  3] = ({1'b0, s_awaddr} >= 33'h0C00_0000 && {1'b0, s_awaddr} < 33'h0C00_0000 + 33'h0400_0000)  // OVIS PLIC [0x0C00_0000, 0x1000_0000)
+                  | ({1'b0, s_awaddr} >= 33'h1000_0000 && {1'b0, s_awaddr} < 33'h1000_0000 + 33'h0008_0000)  // Legacy peri + NNA [0x1000_0000, 0x1008_0000)
+                  | ({1'b0, s_awaddr} >= 33'h2000_0000 && {1'b0, s_awaddr} < 33'h2000_0000 + 33'h0100_0000); // OVIS peri [0x2000_0000, 0x2100_0000)
 assign awsel[  4] = {1'b0, s_awaddr} >= 33'h8000_0000 && {1'b0, s_awaddr} < 33'h8000_0000 + 33'h8000_0000;
 assign awsel[  5] = ~|awsel[4:0]; // default slv
 
 assign arsel[  0] = {1'b0, s_araddr} >= 33'h0000_0000 && {1'b0, s_araddr} < 33'h0000_0000 + 33'h0000_2000;
 assign arsel[  1] = {1'b0, s_araddr} >= 33'h0002_0000 && {1'b0, s_araddr} < 33'h0002_0000 + 33'h0002_0000;
-assign arsel[  2] = {1'b0, s_araddr} >= 33'h0400_0000 && {1'b0, s_araddr} < 33'h0400_0000 + 33'h0c00_0000;
-assign arsel[  3] = {1'b0, s_araddr} >= 33'h1000_0000 && {1'b0, s_araddr} < 33'h1000_0000 + 33'h0000_3000;
+assign arsel[  2] = {1'b0, s_araddr} >= 33'h0400_0000 && {1'b0, s_araddr} < 33'h0400_0000 + 33'h0800_0000; // OVIS: shrunk to [0x0400_0000, 0x0C00_0000) — CFGREG, DBGMON, CLINT
+assign arsel[  3] = ({1'b0, s_araddr} >= 33'h0C00_0000 && {1'b0, s_araddr} < 33'h0C00_0000 + 33'h0400_0000)  // OVIS PLIC [0x0C00_0000, 0x1000_0000)
+                  | ({1'b0, s_araddr} >= 33'h1000_0000 && {1'b0, s_araddr} < 33'h1000_0000 + 33'h0008_0000)  // Legacy peri + NNA [0x1000_0000, 0x1008_0000)
+                  | ({1'b0, s_araddr} >= 33'h2000_0000 && {1'b0, s_araddr} < 33'h2000_0000 + 33'h0100_0000); // OVIS peri [0x2000_0000, 0x2100_0000)
 assign arsel[  4] = {1'b0, s_araddr} >= 33'h8000_0000 && {1'b0, s_araddr} < 33'h8000_0000 + 33'h8000_0000;
 assign arsel[  5] = ~|arsel[4:0]; // default slv
 
@@ -19676,36 +19755,87 @@ module peri_apb_conn (
     apb_intf.slave  peri_apb,
     apb_intf.master uart_apb,
     apb_intf.master spi_apb,
-    apb_intf.master mac_apb
+    apb_intf.master mac_apb,
+    apb_intf.master nna_apb,     // OVIS-1: NNA at offset 0x3000 (regs + ORAM)
+    apb_intf.master ovis_apb     // OVIS-1: external peripheral bus (PLIC, CSI, VENC, Crypto, VDMA)
 );
 
-assign uart_apb.psel    = ~|peri_apb.paddr[13:12] && peri_apb.psel;
-assign uart_apb.penable = ~|peri_apb.paddr[13:12] && peri_apb.penable;
-assign uart_apb.paddr   =   peri_apb.paddr;
-assign uart_apb.pwrite  =   peri_apb.pwrite;
-assign uart_apb.pstrb   =   peri_apb.pstrb;
-assign uart_apb.pprot   =   peri_apb.pprot;
-assign uart_apb.pwdata  =   peri_apb.pwdata;
+// Address decode — top-level region select:
+// OVIS external peripherals: addr >= 0x0C00_0000 (PLIC) or addr >= 0x2000_0000 (ISP/VENC/Crypto/CSI/VDMA)
+// Legacy peripherals: addr in [0x1000_0000, 0x1008_0000)
+wire ovis_sel = (peri_apb.paddr[31:26] == 6'b000011)         // 0x0C00_0000 - 0x0FFF_FFFF (PLIC)
+              | (peri_apb.paddr[31:24] == 8'h20);             // 0x2000_0000 - 0x20FF_FFFF (OVIS peri)
 
-assign spi_apb.psel     =   peri_apb.paddr[12] && peri_apb.psel;
-assign spi_apb.penable  =   peri_apb.paddr[12] && peri_apb.penable;
-assign spi_apb.paddr    =   peri_apb.paddr;
-assign spi_apb.pwrite   =   peri_apb.pwrite;
-assign spi_apb.pstrb    =   peri_apb.pstrb;
-assign spi_apb.pprot    =   peri_apb.pprot;
-assign spi_apb.pwdata   =   peri_apb.pwdata;
+// Legacy decode (unchanged for NNA + UART/SPI/MAC at 0x1000_xxxx):
+// NNA occupies 0x3000+ (regs at 0x3000-0x3FFF, ORAM at 0x4000+)
+// NNA selected when paddr[13:12]==11 OR paddr[14]==1
+// Otherwise decode [13:12] for legacy peripherals:
+//   00 = UART  (0x10000000)
+//   01 = SPI   (0x10001000) + DMA (0x10001800)
+//   10 = MAC   (0x10002000)
+wire nna_sel = !ovis_sel && ((peri_apb.paddr[13:12] == 2'b11) || peri_apb.paddr[14]);
+wire [1:0] peri_sel = peri_apb.paddr[13:12];
+wire legacy_sel = !ovis_sel && !nna_sel;
 
-assign mac_apb.psel     =   peri_apb.paddr[13] && peri_apb.psel;
-assign mac_apb.penable  =   peri_apb.paddr[13] && peri_apb.penable;
-assign mac_apb.paddr    =   peri_apb.paddr;
-assign mac_apb.pwrite   =   peri_apb.pwrite;
-assign mac_apb.pstrb    =   peri_apb.pstrb;
-assign mac_apb.pprot    =   peri_apb.pprot;
-assign mac_apb.pwdata   =   peri_apb.pwdata;
+assign uart_apb.psel    = legacy_sel && (peri_sel == 2'b00) && peri_apb.psel;
+assign uart_apb.penable = legacy_sel && (peri_sel == 2'b00) && peri_apb.penable;
+assign uart_apb.paddr   =  peri_apb.paddr;
+assign uart_apb.pwrite  =  peri_apb.pwrite;
+assign uart_apb.pstrb   =  peri_apb.pstrb;
+assign uart_apb.pprot   =  peri_apb.pprot;
+assign uart_apb.pwdata  =  peri_apb.pwdata;
 
-assign peri_apb.prdata  =   peri_apb.paddr[12] ? spi_apb.prdata  : peri_apb.paddr[13] ? mac_apb.prdata  : uart_apb.prdata;
-assign peri_apb.pslverr =   peri_apb.paddr[12] ? spi_apb.pslverr : peri_apb.paddr[13] ? mac_apb.pslverr : uart_apb.pslverr;
-assign peri_apb.pready  =   peri_apb.paddr[12] ? spi_apb.pready  : peri_apb.paddr[13] ? mac_apb.pready  : uart_apb.pready;
+assign spi_apb.psel     = legacy_sel && (peri_sel == 2'b01) && peri_apb.psel;
+assign spi_apb.penable  = legacy_sel && (peri_sel == 2'b01) && peri_apb.penable;
+assign spi_apb.paddr    =  peri_apb.paddr;
+assign spi_apb.pwrite   =  peri_apb.pwrite;
+assign spi_apb.pstrb    =  peri_apb.pstrb;
+assign spi_apb.pprot    =  peri_apb.pprot;
+assign spi_apb.pwdata   =  peri_apb.pwdata;
+
+assign mac_apb.psel     = legacy_sel && (peri_sel == 2'b10) && peri_apb.psel;
+assign mac_apb.penable  = legacy_sel && (peri_sel == 2'b10) && peri_apb.penable;
+assign mac_apb.paddr    =  peri_apb.paddr;
+assign mac_apb.pwrite   =  peri_apb.pwrite;
+assign mac_apb.pstrb    =  peri_apb.pstrb;
+assign mac_apb.pprot    =  peri_apb.pprot;
+assign mac_apb.pwdata   =  peri_apb.pwdata;
+
+// NNA receives local offset from 0x10003000 (subtract 0x3000 from lower bits)
+assign nna_apb.psel     = nna_sel && peri_apb.psel;
+assign nna_apb.penable  = nna_sel && peri_apb.penable;
+assign nna_apb.paddr    = peri_apb.paddr - 32'h10003000;
+assign nna_apb.pwrite   =  peri_apb.pwrite;
+assign nna_apb.pstrb    =  peri_apb.pstrb;
+assign nna_apb.pprot    =  peri_apb.pprot;
+assign nna_apb.pwdata   =  peri_apb.pwdata;
+
+// OVIS external APB — pass through full address (bridge handles decode)
+assign ovis_apb.psel    = ovis_sel && peri_apb.psel;
+assign ovis_apb.penable = ovis_sel && peri_apb.penable;
+assign ovis_apb.paddr   =  peri_apb.paddr;
+assign ovis_apb.pwrite  =  peri_apb.pwrite;
+assign ovis_apb.pstrb   =  peri_apb.pstrb;
+assign ovis_apb.pprot   =  peri_apb.pprot;
+assign ovis_apb.pwdata  =  peri_apb.pwdata;
+
+always_comb begin
+    if (ovis_sel) begin
+        peri_apb.prdata  = ovis_apb.prdata;
+        peri_apb.pslverr = ovis_apb.pslverr;
+        peri_apb.pready  = ovis_apb.pready;
+    end else if (nna_sel) begin
+        peri_apb.prdata  = nna_apb.prdata;
+        peri_apb.pslverr = nna_apb.pslverr;
+        peri_apb.pready  = nna_apb.pready;
+    end else begin
+        case (peri_sel)
+            2'b01:   begin peri_apb.prdata = spi_apb.prdata;  peri_apb.pslverr = spi_apb.pslverr;  peri_apb.pready = spi_apb.pready;  end
+            2'b10:   begin peri_apb.prdata = mac_apb.prdata;  peri_apb.pslverr = mac_apb.pslverr;  peri_apb.pready = mac_apb.pready;  end
+            default: begin peri_apb.prdata = uart_apb.prdata; peri_apb.pslverr = uart_apb.pslverr; peri_apb.pready = uart_apb.pready; end
+        endcase
+    end
+end
 
 endmodule
 
