@@ -10530,9 +10530,9 @@ assign ovis_apb_intf.pslverr = ovis_pslverr;
 assign ovis_apb_intf.pready  = ovis_pready;
 
 // NNA APB — inactive in cpu_wrap.all.sv (NNA connected externally)
-assign nna_apb.slave.prdata  = 32'b0;
-assign nna_apb.slave.pslverr = 1'b0;
-assign nna_apb.slave.pready  = 1'b1;
+assign nna_apb.prdata  = 32'b0;
+assign nna_apb.pslverr = 1'b0;
+assign nna_apb.pready  = 1'b1;
 
 uart u_uart(
     .clk        ( clk            ),
