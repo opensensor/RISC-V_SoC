@@ -296,6 +296,7 @@ logic                             m1_snp_ready;
 logic                             uart_irq;
 logic                             spi_irq;
 logic                             mac_irq;
+logic                             nna_irq;
 logic                             dbgmon_irq;
 
 logic [              `XLEN - 1:0] dbg_gpr_all [32];
@@ -839,7 +840,8 @@ sram u_sram (
 );
 
 assign ints = {
-    26'b0,
+    25'b0,
+    nna_irq,       // bit 6: NNA inference/DMA complete
     ext_plic_eip,  // bit 5: OVIS SoC-level PLIC aggregated interrupt
     dbgmon_irq,
     mac_irq,
@@ -921,6 +923,7 @@ peri u_peri (
     .uart_irq       ( uart_irq       ),
     .spi_irq        ( spi_irq        ),
     .mac_irq        ( mac_irq        ),
+    .nna_irq        ( nna_irq        ),
 
     // OVIS external APB
     .ovis_psel      ( ovis_psel      ),

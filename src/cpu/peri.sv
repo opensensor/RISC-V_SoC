@@ -33,6 +33,7 @@ module peri (
     output            uart_irq,
     output            spi_irq,
     output            mac_irq,
+    output            nna_irq,
 
     // OVIS external APB (PLIC, CSI, VENC, Crypto, VDMA)
     output            ovis_psel,
@@ -122,18 +123,36 @@ mac u_mac (
 // OVIS-1: Neural Network Accelerator
 `include "ovis_config.svh"
 nna_unit u_nna (
-    .clk     ( clk                      ),
-    .rstn    ( rstn                     ),
-    .psel    ( nna_apb.slave.psel       ),
-    .penable ( nna_apb.slave.penable    ),
-    .paddr   ( nna_apb.slave.paddr      ),
-    .pwrite  ( nna_apb.slave.pwrite     ),
-    .pstrb   ( nna_apb.slave.pstrb      ),
-    .pwdata  ( nna_apb.slave.pwdata     ),
-    .prdata  ( nna_apb.slave.prdata     ),
-    .pready  ( nna_apb.slave.pready     ),
-    .pslverr ( nna_apb.slave.pslverr    ),
-    .irq     (                          )   // TODO: connect to interrupt controller
+    .clk             ( clk                      ),
+    .rstn            ( rstn                     ),
+    .psel            ( nna_apb.slave.psel       ),
+    .penable         ( nna_apb.slave.penable    ),
+    .paddr           ( nna_apb.slave.paddr      ),
+    .pwrite          ( nna_apb.slave.pwrite     ),
+    .pstrb           ( nna_apb.slave.pstrb      ),
+    .pwdata          ( nna_apb.slave.pwdata     ),
+    .prdata          ( nna_apb.slave.prdata     ),
+    .pready          ( nna_apb.slave.pready     ),
+    .pslverr         ( nna_apb.slave.pslverr    ),
+    // DMA AXI master — tied off (will be connected to SoC bus in future)
+    .m_axi_araddr    (                          ),
+    .m_axi_arvalid   (                          ),
+    .m_axi_arready   ( 1'b0                     ),
+    .m_axi_rdata     ( 32'b0                    ),
+    .m_axi_rresp     ( 2'b00                    ),
+    .m_axi_rvalid    ( 1'b0                     ),
+    .m_axi_rready    (                          ),
+    .m_axi_awaddr    (                          ),
+    .m_axi_awvalid   (                          ),
+    .m_axi_awready   ( 1'b0                     ),
+    .m_axi_wdata     (                          ),
+    .m_axi_wstrb     (                          ),
+    .m_axi_wvalid    (                          ),
+    .m_axi_wready    ( 1'b0                     ),
+    .m_axi_bresp     ( 2'b00                    ),
+    .m_axi_bvalid    ( 1'b0                     ),
+    .m_axi_bready    (                          ),
+    .irq             ( nna_irq                  )
 );
 
 endmodule
