@@ -331,6 +331,32 @@ logic                             ovx_sat_en;
 logic                             ovx_en;
 logic                             ovx_sat_occurred;
 logic                             ovx_write;
+
+// OVX decoupled execution signals
+logic                             ovx_fifo_push;
+logic                             ovx_fifo_pop;
+logic                             ovx_fifo_full;
+logic                             ovx_fifo_empty;
+logic                             ovx_fifo_has_sync;
+logic [                      6:0] ovx_fifo_out_funct7;
+logic [                      2:0] ovx_fifo_out_funct3;
+logic [                      3:0] ovx_fifo_out_vs1_addr;
+logic [                      3:0] ovx_fifo_out_vs2_addr;
+logic [                      3:0] ovx_fifo_out_vd_addr;
+logic [              `XLEN - 1:0] ovx_fifo_out_scalar_in;
+logic [              `XLEN - 1:0] ovx_fifo_out_imm;
+logic                             ovx_fifo_out_is_custom1;
+logic [                      4:0] ovx_fifo_out_rd_addr;
+logic                             ovx_fifo_out_rd_wr;
+logic                             ovx_is_mvfv_insn;
+logic                             ovx_is_sync_insn;
+logic                             ovx_needs_drain;
+logic                             ovx_busy;
+// OVX result writeback (from decoupled MVFV — unused in drain-before-MVFV model)
+logic                             ovx_result_valid;
+logic [                      4:0] ovx_result_rd_addr;
+logic [              `XLEN - 1:0] ovx_result_rd_data;
+
 logic [              `XLEN - 1:0] exe_rd_data;
 logic [              `XLEN - 1:0] exe_pc2rd;
 logic                             exe_gpr_hazard;
@@ -997,10 +1023,47 @@ assign exe_rs2_data  = ({`XLEN{ exe2ma_fwd_table   [id2exe_rs2_addr]}} & ma_rd_d
 assign exe_gpr_hazard = (id2exe_rs1_rd && (exe2ma_hz_table[id2exe_rs1_addr] || ma2mr_hz_table[id2exe_rs1_addr])) ||
                         (id2exe_rs2_rd && (exe2ma_hz_table[id2exe_rs2_addr] || ma2mr_hz_table[id2exe_rs2_addr]));
 assign exe_mdu_hazard = id2exe_mdu_sel && ~exe_mdu_okay;
-// Stall the pipeline when:
-// 1. An OVX instruction is in EXE and the OVX unit is busy (okay=0), OR
-// 2. The OVX memory port is actively driving dmem (prevent DPU conflicts)
-assign exe_ovx_hazard = (id2exe_ovx_sel && ~exe_ovx_okay) || exe_ovx_mem_req;
+
+// ========================================================================
+// OVX Decoupled Execution — Hazard Detection
+// ========================================================================
+// Detect MVFV instruction (class=111, sub=01) in EXE stage — custom-0 opcode
+assign ovx_is_mvfv_insn = id2exe_ovx_sel && (id2exe_insn[6:2] == 5'b00_010) &&
+                          (id2exe_insn[31:29] == 3'b111) && (id2exe_insn[26:25] == 2'b01);
+// Detect OVX.SYNC instruction: custom-0 with funct7=7'b1111111 (0x7F)
+assign ovx_is_sync_insn = id2exe_ovx_sel && (id2exe_insn[6:2] == 5'b00_010) &&
+                          (id2exe_insn[31:25] == 7'b1111111);
+
+// Instructions that bypass the FIFO and execute directly through the OVX unit.
+logic ovx_direct_insn;
+assign ovx_direct_insn = ovx_is_mvfv_insn || ovx_is_sync_insn || ovx_is_custom1_in_exe;
+
+// MVFV and OVX.SYNC need FIFO drain + OVX idle before proceeding
+assign ovx_needs_drain = id2exe_ovx_sel &&
+                         (ovx_is_mvfv_insn || ovx_is_sync_insn) &&
+                         (!ovx_fifo_empty || ovx_busy);
+
+// VLD/VST: must drain FIFO first (wait for FIFO empty), then use the
+// original stall mechanism (okay=0 during multi-cycle transfer).
+// The OVX unit's trig-in-LS_IDLE gating prevents re-triggering during
+// LS_BUSY/LS_DONE, and okay=1 at LS_DONE allows the pipeline to advance.
+logic ovx_vldst_fifo_wait;
+assign ovx_vldst_fifo_wait = id2exe_ovx_sel && ovx_is_custom1_in_exe &&
+                              !ovx_fifo_empty;
+
+// OVX hazard conditions for decoupled execution:
+// 1. Queueable OVX op but FIFO is full — stall until space available
+// 2. MVFV / OVX.SYNC: need FIFO drain + OVX idle
+// 3. VLD/VST waiting for FIFO to drain before starting
+// 4. VLD/VST executing: stall while OVX unit is processing (okay=0)
+//    This is the EXACT same stall mechanism as the original pre-FIFO design.
+// 5. OVX memory port is active (prevent DPU conflicts)
+assign exe_ovx_hazard = (ovx_can_queue && ovx_fifo_full) ||
+                        ovx_needs_drain ||
+                        ovx_vldst_fifo_wait ||
+                        (id2exe_ovx_sel && ovx_is_custom1_in_exe && ~exe_ovx_okay) ||
+                        exe_ovx_mem_req;
+
 assign exe_mem_hazard = exe2ma_mem_req  || ma2mr_mem_req_wo_flush ||
                         ma_pipe_restart || mr_pipe_restart;
 assign exe_csr_hazard = exe_mem_hazard &&
@@ -1078,19 +1141,162 @@ assign ovx_mem_wdata = exe_ovx_mem_wdata;
 // Hazard signal for OVX memory operations
 assign dmem_ovx_active = exe_ovx_mem_req;
 
+// ========================================================================
+// OVX Command FIFO — Decoupled Execution
+// ========================================================================
+// The CPU pushes OVX instructions into the FIFO and proceeds with scalar
+// work (unless the FIFO is full, or the instruction is MVFV/OVX.SYNC).
+// The OVX unit drains the FIFO independently.
+//
+// Instructions that bypass the FIFO (execute directly, stall pipeline):
+//   - MVFV: needs GPR writeback through normal pipeline path
+//   - OVX.SYNC: wait for FIFO drain, then proceed
+//
+// Instructions that go through the FIFO:
+//   - V-V ALU ops (VADD, VSUB, etc.)
+//   - MVTV (GPR value captured at dispatch)
+//   - VLD/VST (GPR base address captured at dispatch)
+
+// Determine if this OVX instruction should be queued (not MVFV, not SYNC, not VLD/VST).
+// VLD/VST (custom-1) bypass the FIFO and stall the pipeline, because:
+// 1. They interact with SRAM memory — the CPU must not proceed past a store
+//    before the data is committed, or read stale data before a load completes.
+// 2. They are already multi-cycle operations, so queueing provides no benefit.
+// Only single-cycle V-V ALU ops and MVTV benefit from FIFO decoupling.
+logic ovx_can_queue;
+logic ovx_is_custom1_in_exe;
+assign ovx_is_custom1_in_exe = exe_ovx_is_custom1;
+assign ovx_can_queue = id2exe_ovx_sel && !ovx_is_mvfv_insn && !ovx_is_sync_insn &&
+                       !ovx_is_custom1_in_exe;
+
+// Push into FIFO when: queueable OVX instruction, no GPR hazard, no flush,
+// FIFO not full, and EXE stage can advance (no other hazards blocking)
+assign ovx_fifo_push = ovx_can_queue && !exe_gpr_hazard && !exe_flush_force &&
+                       !ovx_fifo_full && !exe_irq_en && !exe_trap_en && !stall_wfi &&
+                       !exe_mdu_hazard && !exe_mem_hazard;
+
+// Pop from FIFO when: OVX unit accepts a command (triggered from FIFO).
+// We pop on the same cycle we trigger, which works because:
+//   - Single-cycle ALU ops: consumed immediately, FIFO advances next cycle
+//   - VLD/VST: OVX latches inputs on trig cycle, goes busy next cycle
+// The pop signal mirrors the FIFO trigger signal.
+assign ovx_fifo_pop = ovx_trig_from_fifo;
+
+ovx_cmd_fifo #(
+    .DEPTH  ( 4 )
+) u_ovx_fifo (
+    .clk              ( clk_wfi                            ),
+    .rstn             ( srstn_sync                         ),
+    .push             ( ovx_fifo_push                      ),
+    .push_funct7      ( id2exe_insn[31:25]                 ),
+    .push_funct3      ( id2exe_insn[14:12]                 ),
+    .push_vs1_addr    ( id2exe_insn[19:16]                 ),
+    .push_vs2_addr    ( id2exe_insn[24:21]                 ),
+    .push_vd_addr     ( id2exe_insn[11:8]                  ),
+    .push_scalar_in   ( exe_rs1_data                       ),
+    .push_imm         ( id2exe_imm                         ),
+    .push_is_custom1  ( exe_ovx_is_custom1                 ),
+    .push_rd_addr     ( id2exe_rd_addr                     ),
+    .push_rd_wr       ( id2exe_rd_wr                       ),
+    .push_is_sync     ( 1'b0                               ),  // SYNC doesn't enter FIFO
+    .pop              ( ovx_fifo_pop                       ),
+    .pop_funct7       ( ovx_fifo_out_funct7                ),
+    .pop_funct3       ( ovx_fifo_out_funct3                ),
+    .pop_vs1_addr     ( ovx_fifo_out_vs1_addr              ),
+    .pop_vs2_addr     ( ovx_fifo_out_vs2_addr              ),
+    .pop_vd_addr      ( ovx_fifo_out_vd_addr               ),
+    .pop_scalar_in    ( ovx_fifo_out_scalar_in             ),
+    .pop_imm          ( ovx_fifo_out_imm                   ),
+    .pop_is_custom1   ( ovx_fifo_out_is_custom1            ),
+    .pop_rd_addr      ( ovx_fifo_out_rd_addr               ),
+    .pop_rd_wr        ( ovx_fifo_out_rd_wr                 ),
+    .full             ( ovx_fifo_full                      ),
+    .empty            ( ovx_fifo_empty                     ),
+    .has_sync         ( ovx_fifo_has_sync                  ),
+    .flush            ( exe_flush_force                    )
+);
+
+// ========================================================================
+// OVX Unit — Fed from FIFO (decoupled) or directly (MVFV)
+// ========================================================================
+// The OVX unit is triggered from the FIFO when entries are available.
+// For MVFV (which bypasses the FIFO), the OVX unit is triggered directly
+// from the EXE stage, just like before.
+//
+// IMPORTANT: To avoid a combinational loop (okay depends on trig, trig
+// depends on okay), we use the registered `busy` signal (ls_state != IDLE)
+// instead of the combinational `okay` signal for FIFO drain decisions.
+
+// OVX trigger: from FIFO drain, direct MVFV, or direct VLD/VST
+logic ovx_trig_from_fifo;
+logic ovx_trig_from_direct;
+logic ovx_trig;
+
+// FIFO drain: trigger OVX when FIFO has data and OVX is idle (not busy).
+// `ovx_busy` is purely registered (ls_state != LS_IDLE), breaking the
+// combinational loop that would occur if we used `exe_ovx_okay` here.
+assign ovx_trig_from_fifo = !ovx_fifo_empty && !ovx_busy && !exe_flush_force;
+
+// Direct execution: MVFV or VLD/VST that bypasses the FIFO.
+//
+// MVFV: triggers when FIFO is drained, OVX is idle, no GPR hazard.
+//
+// VLD/VST: triggers like the original design — asserted whenever the
+// instruction is in EXE and there's no GPR hazard. The OVX unit only
+// responds to trig in LS_IDLE state, so asserting trig during LS_BUSY
+// is harmless. The okay signal gates the pipeline stall.
+// We still require FIFO empty before starting (ovx_vldst_fifo_wait handles this).
+logic ovx_trig_mvfv;
+logic ovx_trig_vldst;
+assign ovx_trig_mvfv = ovx_is_mvfv_insn && !exe_gpr_hazard &&
+                       ovx_fifo_empty && !ovx_busy && !exe_flush_force &&
+                       !exe_irq_en && !exe_trap_en && !stall_wfi;
+
+assign ovx_trig_vldst = id2exe_ovx_sel && ovx_is_custom1_in_exe && !exe_gpr_hazard &&
+                        ovx_fifo_empty && !exe_flush_force;
+
+assign ovx_trig_from_direct = ovx_trig_mvfv || ovx_trig_vldst;
+
+assign ovx_trig = ovx_trig_from_fifo || ovx_trig_from_direct;
+
+// Mux instruction fields: FIFO output vs direct from EXE pipeline
+logic [          6:0] ovx_mux_funct7;
+logic [          2:0] ovx_mux_funct3;
+logic [          3:0] ovx_mux_vs1_addr;
+logic [          3:0] ovx_mux_vs2_addr;
+logic [          3:0] ovx_mux_vd_addr;
+logic [`XLEN - 1 : 0] ovx_mux_scalar_in;
+logic [`XLEN - 1 : 0] ovx_mux_imm;
+logic                  ovx_mux_is_custom1;
+logic [          4:0] ovx_mux_rd_addr;
+logic                  ovx_mux_rd_wr;
+
+assign ovx_mux_funct7     = ovx_trig_from_fifo ? ovx_fifo_out_funct7     : id2exe_insn[31:25];
+assign ovx_mux_funct3     = ovx_trig_from_fifo ? ovx_fifo_out_funct3     : id2exe_insn[14:12];
+assign ovx_mux_vs1_addr   = ovx_trig_from_fifo ? ovx_fifo_out_vs1_addr   : id2exe_insn[19:16];
+assign ovx_mux_vs2_addr   = ovx_trig_from_fifo ? ovx_fifo_out_vs2_addr   : id2exe_insn[24:21];
+assign ovx_mux_vd_addr    = ovx_trig_from_fifo ? ovx_fifo_out_vd_addr    : id2exe_insn[11:8];
+assign ovx_mux_scalar_in  = ovx_trig_from_fifo ? ovx_fifo_out_scalar_in  : exe_rs1_data;
+assign ovx_mux_imm        = ovx_trig_from_fifo ? ovx_fifo_out_imm        : id2exe_imm;
+assign ovx_mux_is_custom1 = ovx_trig_from_fifo ? ovx_fifo_out_is_custom1 : exe_ovx_is_custom1;
+assign ovx_mux_rd_addr    = ovx_trig_from_fifo ? ovx_fifo_out_rd_addr    : id2exe_rd_addr;
+assign ovx_mux_rd_wr      = ovx_trig_from_fifo ? ovx_fifo_out_rd_wr      : id2exe_rd_wr;
+
 ovx_unit u_ovx (
     .clk            ( clk_wfi                            ),
     .rstn           ( srstn_sync                         ),
-    .trig           ( id2exe_ovx_sel & ~exe_gpr_hazard   ),
-    .funct7         ( id2exe_insn[31:25]                  ),
-    .funct3         ( id2exe_insn[14:12]                  ),
-    .vs1_addr       ( id2exe_insn[19:16]                  ),
-    .vs2_addr       ( id2exe_insn[24:21]                  ),
-    .vd_addr        ( id2exe_insn[11:8]                   ),
+    .trig           ( ovx_trig                            ),
+    .funct7         ( ovx_mux_funct7                      ),
+    .funct3         ( ovx_mux_funct3                      ),
+    .vs1_addr       ( ovx_mux_vs1_addr                    ),
+    .vs2_addr       ( ovx_mux_vs2_addr                    ),
+    .vd_addr        ( ovx_mux_vd_addr                     ),
     .flush          ( exe_flush_force                     ),
-    .scalar_in      ( exe_rs1_data                        ),
-    .imm            ( id2exe_imm                          ),
-    .is_custom1     ( exe_ovx_is_custom1                  ),
+    .scalar_in      ( ovx_mux_scalar_in                   ),
+    .imm            ( ovx_mux_imm                         ),
+    .is_custom1     ( ovx_mux_is_custom1                  ),
+    .cmd_rd_addr    ( ovx_mux_rd_addr                     ),
+    .cmd_rd_wr      ( ovx_mux_rd_wr                       ),
     .okay           ( exe_ovx_okay                        ),
     .scalar_out     ( exe_ovx_scalar_out                  ),
     .mem_req        ( exe_ovx_mem_req                     ),
@@ -1101,7 +1307,11 @@ ovx_unit u_ovx (
     .mem_ready      ( exe_ovx_mem_ready                   ),
     .rounding_mode  ( ovx_rounding_mode                   ),
     .sat_occurred   ( ovx_sat_occurred                    ),
-    .ovx_write      ( ovx_write                           )
+    .ovx_write      ( ovx_write                           ),
+    .result_valid   ( ovx_result_valid                    ),
+    .result_rd_addr ( ovx_result_rd_addr                  ),
+    .result_rd_data ( ovx_result_rd_data                  ),
+    .busy           ( ovx_busy                            )
 );
 
 ovx_csr u_ovx_csr (
@@ -1121,10 +1331,12 @@ ovx_csr u_ovx_csr (
     .ovx_write      ( ovx_write         )
 );
 
-// exe_rd_data mux: MDU result, OVX scalar result (MVFV), or ALU result
+// exe_rd_data mux: MDU result, OVX scalar result (MVFV only), or ALU result
+// In decoupled mode, only MVFV produces a GPR result through the pipeline.
+// Other OVX instructions go through the FIFO and don't contribute to exe_rd_data.
 assign exe_rd_data = ({`XLEN{ id2exe_mdu_sel}} & exe_mdu_out) |
-                     ({`XLEN{ id2exe_ovx_sel}} & exe_ovx_scalar_out) |
-                     ({`XLEN{~id2exe_mdu_sel & ~id2exe_ovx_sel}} & exe_alu_out);
+                     ({`XLEN{ ovx_is_mvfv_insn}} & exe_ovx_scalar_out) |
+                     ({`XLEN{~id2exe_mdu_sel & ~ovx_is_mvfv_insn}} & exe_alu_out);
 
 assign exe_pmu_csr_wr = id2exe_pmu_csr_wr & ~exe_flush_force & ~exe_hazard & ~exe_irq_en & ~exe_trap_en & ~stall_wfi;
 assign exe_fpu_csr_wr = id2exe_fpu_csr_wr & ~exe_flush_force & ~exe_hazard & ~exe_irq_en & ~exe_trap_en & ~stall_wfi;
