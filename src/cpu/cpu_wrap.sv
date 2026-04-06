@@ -225,13 +225,6 @@ logic                             dpma_e;
 logic [    `SATP_PPN_WIDTH - 1:0] satp_ppn;
 logic [   `SATP_ASID_WIDTH - 1:0] satp_asid;
 logic [   `SATP_MODE_WIDTH - 1:0] satp_mode;
-// Pipeline register to break satp_mode → MMU → MPU critical path
-// Adds 1 cycle latency to satp CSR writes (only during OS context switches)
-logic [   `SATP_MODE_WIDTH - 1:0] satp_mode_r;
-always_ff @(posedge clk or negedge rstn) begin
-    if (~rstn) satp_mode_r <= '0;
-    else       satp_mode_r <= satp_mode;
-end
 logic [                      1:0] prv;
 logic                             sum;
 logic                             mprv;
@@ -492,11 +485,11 @@ mmu u_immu (
     .pma_c               ( ipma_c              ),
     .pma_e               ( ipma_e              ),
 
-    // mmu csr (uses pipelined satp_mode for timing closure)
+    // mmu csr
     .rv64_mode           ( rv64_mode           ),
     .satp_ppn            ( satp_ppn            ),
     .satp_asid           ( satp_asid           ),
-    .satp_mode           ( satp_mode_r         ),
+    .satp_mode           ( satp_mode           ),
     .prv                 ( prv                 ),
     .sum                 ( sum                 ),
     .mprv                ( mprv                ),
@@ -552,11 +545,11 @@ mmu u_dmmu (
     .pma_c               ( dpma_c              ),
     .pma_e               ( dpma_e              ),
 
-    // mmu csr (uses pipelined satp_mode for timing closure)
+    // mmu csr
     .rv64_mode           ( rv64_mode           ),
     .satp_ppn            ( satp_ppn            ),
     .satp_asid           ( satp_asid           ),
-    .satp_mode           ( satp_mode_r         ),
+    .satp_mode           ( satp_mode           ),
     .prv                 ( prv                 ),
     .sum                 ( sum                 ),
     .mprv                ( mprv                ),
