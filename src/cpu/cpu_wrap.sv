@@ -143,7 +143,26 @@ module cpu_wrap (
     output logic  [ 31: 0] ovis_pwdata,
     input         [ 31: 0] ovis_prdata,
     input                  ovis_pslverr,
-    input                  ovis_pready
+    input                  ovis_pready,
+
+    // NNA DMA AXI master (direct path to SoC-level DDR arbiter)
+    output logic  [ 31: 0] nna_m_axi_araddr,
+    output logic           nna_m_axi_arvalid,
+    input                  nna_m_axi_arready,
+    input         [ 31: 0] nna_m_axi_rdata,
+    input         [  1: 0] nna_m_axi_rresp,
+    input                  nna_m_axi_rvalid,
+    output logic           nna_m_axi_rready,
+    output logic  [ 31: 0] nna_m_axi_awaddr,
+    output logic           nna_m_axi_awvalid,
+    input                  nna_m_axi_awready,
+    output logic  [ 31: 0] nna_m_axi_wdata,
+    output logic  [  3: 0] nna_m_axi_wstrb,
+    output logic           nna_m_axi_wvalid,
+    input                  nna_m_axi_wready,
+    input         [  1: 0] nna_m_axi_bresp,
+    input                  nna_m_axi_bvalid,
+    output logic           nna_m_axi_bready
 );
 
 logic                             core_rstn;
@@ -935,7 +954,26 @@ peri u_peri (
     .ovis_pwdata    ( ovis_pwdata    ),
     .ovis_prdata    ( ovis_prdata    ),
     .ovis_pslverr   ( ovis_pslverr   ),
-    .ovis_pready    ( ovis_pready    )
+    .ovis_pready    ( ovis_pready    ),
+
+    // NNA DMA AXI master
+    .nna_m_axi_araddr  ( nna_m_axi_araddr  ),
+    .nna_m_axi_arvalid ( nna_m_axi_arvalid ),
+    .nna_m_axi_arready ( nna_m_axi_arready ),
+    .nna_m_axi_rdata   ( nna_m_axi_rdata   ),
+    .nna_m_axi_rresp   ( nna_m_axi_rresp   ),
+    .nna_m_axi_rvalid  ( nna_m_axi_rvalid  ),
+    .nna_m_axi_rready  ( nna_m_axi_rready  ),
+    .nna_m_axi_awaddr  ( nna_m_axi_awaddr  ),
+    .nna_m_axi_awvalid ( nna_m_axi_awvalid ),
+    .nna_m_axi_awready ( nna_m_axi_awready ),
+    .nna_m_axi_wdata   ( nna_m_axi_wdata   ),
+    .nna_m_axi_wstrb   ( nna_m_axi_wstrb   ),
+    .nna_m_axi_wvalid  ( nna_m_axi_wvalid  ),
+    .nna_m_axi_wready  ( nna_m_axi_wready  ),
+    .nna_m_axi_bresp   ( nna_m_axi_bresp   ),
+    .nna_m_axi_bvalid  ( nna_m_axi_bvalid  ),
+    .nna_m_axi_bready  ( nna_m_axi_bready  )
 );
 
 assign trstn = 1'b1;
