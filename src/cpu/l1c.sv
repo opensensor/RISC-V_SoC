@@ -36,7 +36,8 @@ parameter [2:0] STATE_IDLE   = 3'b000,
                 STATE_MREQ   = 3'b010,
                 STATE_REFILL = 3'b011,
                 STATE_WRITE  = 3'b100,
-                STATE_READ   = 3'b101;
+                STATE_READ   = 3'b101,
+                STATE_HIT    = 3'b110;  // Pipeline stage: registered cache hit data
 
 logic [                      2:0] cur_state;
 logic [                      2:0] nxt_state;
@@ -110,8 +111,12 @@ always_comb begin
                          core_bypass ? STATE_READ:
                          hit         ? core_req ? core_wr     ? STATE_WRITE:
                                                                 STATE_CMP:
-                                                  STATE_IDLE:
+                                                  STATE_HIT:
                                        STATE_MREQ;
+        end
+        STATE_HIT   : begin
+            // Registered cache hit: data available this cycle, proceed
+            nxt_state = core_req ? core_wr ? STATE_WRITE : STATE_CMP : STATE_IDLE;
         end
         STATE_MREQ  : begin
             nxt_state = m_axi_intf.arready ? STATE_REFILL : STATE_MREQ;
@@ -153,7 +158,8 @@ always_comb begin
             data_cs            = core_req;
         end
         STATE_CMP   : begin
-            core_busy          = ~hit || |core_pa_bad || |core_bypass;
+            // Stay busy on hit — data will be ready in STATE_HIT (pipeline register)
+            core_busy          = 1'b1;
             tag_cs             = ~core_pa_vld || (hit && core_req);
             data_cs            = ~core_pa_vld || (hit && core_req);
         end
@@ -196,6 +202,12 @@ always_comb begin
             rdata_high_tmp_wr  = (~burst_1st || core_vaddr_latch[2]) & m_axi_intf.rvalid;
 `endif
         end
+        STATE_HIT   : begin
+            // Registered hit data is ready — release pipeline
+            core_busy          = 1'b0;
+            tag_cs             = core_req;
+            data_cs            = core_req;
+        end
     endcase
 end
 
@@ -207,7 +219,14 @@ assign data_addr  = core_busy ? core_vaddr_latch[`CACHE_BLK_WIDTH+:`CACHE_IDX_WI
 assign tag_in     = core_paddr_latch[`CACHE_TAG_REGION];
 assign hit        = valid_latch && core_pa_vld && (tag_out == core_paddr[`CACHE_TAG_REGION]);
 
-assign core_rdata = cur_state == STATE_IDLE ? core_rdata_tmp:
+// Registered cache hit data — breaks the BRAM→mux→CPU combinational path
+logic [`XLEN-1:0] hit_rdata_reg;
+always_ff @(posedge clk) begin
+    hit_rdata_reg <= data_out[{core_vaddr_latch[`CACHE_BLK_WIDTH-1:$clog2(`CACHE_DATA_WIDTH/8)], {3+$clog2(`CACHE_DATA_WIDTH/8){1'b0}}}+:`XLEN];
+end
+
+assign core_rdata = cur_state == STATE_HIT  ? hit_rdata_reg :
+                    cur_state == STATE_IDLE  ? core_rdata_tmp :
                     data_out[{core_vaddr_latch[`CACHE_BLK_WIDTH-1:$clog2(`CACHE_DATA_WIDTH/8)], {3+$clog2(`CACHE_DATA_WIDTH/8){1'b0}}}+:`XLEN];
 assign m_axi_intf.awid     = 10'b0;
 assign m_axi_intf.awaddr   = core_paddr_latch;
