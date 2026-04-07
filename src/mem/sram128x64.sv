@@ -358,23 +358,24 @@ SRAM i_SRAM_3 (
     .CS   ( CS           )
 );
 `else
-logic [63:0] data_out_pre;
 logic [63:0] memory [128];
 
-assign data_out_pre = CS ? memory[A] : 64'hx;
+// Stage 1: BRAM internal read + write
+logic [63:0] rd_raw;
 
 always_ff @(posedge CK) begin
     integer i;
-
     if (CS & WE) begin
         for (i = 0; i < 8; i = i + 1) begin
             if (BYTE[i]) memory[A][i*8+:8] <= DI[i*8+:8];
         end
     end
+    if (CS) rd_raw <= memory[A];
 end
 
+// Stage 2: Output register (Vivado merges into BRAM DOA_REG)
 always_ff @(posedge CK) begin
-    DO <= data_out_pre;
+    DO <= rd_raw;
 end
 `endif
 
